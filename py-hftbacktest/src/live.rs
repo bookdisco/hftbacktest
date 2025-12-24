@@ -189,6 +189,19 @@ pub extern "C" fn hashmaplive_cancel(
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn hashmaplive_modify(
+    hbt_ptr: *mut HashMapMarketDepthLiveBot,
+    asset_no: usize,
+    order_id: u64,
+    price: f64,
+    qty: f64,
+    wait: bool,
+) -> i64 {
+    let hbt = unsafe { &mut *hbt_ptr };
+    handle_result(hbt.modify(asset_no, order_id, price, qty, wait))
+}
+
+#[unsafe(no_mangle)]
 pub extern "C" fn hashmaplive_clear_last_trades(
     hbt_ptr: *mut HashMapMarketDepthLiveBot,
     asset_no: usize,
@@ -429,6 +442,19 @@ pub extern "C" fn roiveclive_cancel(
 ) -> i64 {
     let hbt = unsafe { &mut *hbt_ptr };
     handle_result(hbt.cancel(asset_no, order_id, wait))
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn roiveclive_modify(
+    hbt_ptr: *mut ROIVectorMarketDepthLiveBot,
+    asset_no: usize,
+    order_id: u64,
+    price: f64,
+    qty: f64,
+    wait: bool,
+) -> i64 {
+    let hbt = unsafe { &mut *hbt_ptr };
+    handle_result(hbt.modify(asset_no, order_id, price, qty, wait))
 }
 
 #[unsafe(no_mangle)]
