@@ -24,3 +24,7 @@ clap = { version = "4.5.53", features = ["derive"] }
 
 # Reuse connector's orderbookmanager and msg types
 connector = { path = "../connector", default-features = false, features = ["binancefutures"] }
+
+# IPC mode: subscribe to connector's market data feed
+hftbacktest = { path = "../hftbacktest", default-features = false, features = ["live"] }
+iceoryx2 = { version = "0.6.1", features = ["logger_tracing"] }

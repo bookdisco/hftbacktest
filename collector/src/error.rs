@@ -8,4 +8,8 @@ pub enum ConnectorError {
     FormatError,
     #[error("connection abort")]
     ConnectionAbort,
+    #[error("IPC error: {0}")]
+    IpcError(String),
+    #[error("Channel error: {0}")]
+    ChannelError(String),
 }

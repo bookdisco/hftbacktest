@@ -421,6 +421,11 @@ async fn main() {
         });
     });
 
+    // Small delay to avoid race condition with iceoryx2 node creation.
+    // When two threads create nodes simultaneously and one uses SignalHandlingMode::Disabled,
+    // the node creation can fail with InternalError.
+    thread::sleep(Duration::from_millis(50));
+
     let name = args.name;
     run_receive_task(&name, pub_tx, &mut connector)
         .map_err(|error| {
