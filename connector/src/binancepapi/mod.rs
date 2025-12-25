@@ -17,7 +17,7 @@ use serde::Deserialize;
 use thiserror::Error;
 use tokio::sync::{broadcast, broadcast::Sender, mpsc::UnboundedSender};
 use tokio_tungstenite::tungstenite;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     binancepapi::{
@@ -390,5 +390,23 @@ impl Connector for BinancePapi {
                 }
             }
         });
+    }
+
+    fn shutdown(&self, symbols: Vec<String>) -> crate::connector::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            info!("Shutting down BinancePapi connector, canceling all open orders...");
+            for symbol in symbols {
+                info!(%symbol, "Canceling all UM orders for symbol");
+                match self.client.cancel_all_um_orders(&symbol).await {
+                    Ok(()) => {
+                        info!(%symbol, "Successfully canceled all UM orders");
+                    }
+                    Err(error) => {
+                        error!(%symbol, ?error, "Failed to cancel all UM orders");
+                    }
+                }
+            }
+            info!("BinancePapi connector shutdown complete");
+        })
     }
 }

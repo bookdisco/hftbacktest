@@ -1,10 +1,15 @@
 use std::{
     fmt::Debug,
+    future::Future,
+    pin::Pin,
     sync::{Arc, Mutex},
 };
 
 use hftbacktest::types::{LiveEvent, Order};
 use tokio::sync::mpsc::UnboundedSender;
+
+/// Type alias for boxed futures used in async trait methods
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// A message will be received by the publisher thread and then published to the bots.
 pub enum PublishEvent {
@@ -51,6 +56,10 @@ pub trait Connector {
     /// through the channel using [`PublishEvent`]. The returned error should not be related to the
     /// exchange; instead, it should indicate a connector internal error.
     fn cancel(&self, symbol: String, order: Order, tx: UnboundedSender<PublishEvent>);
+
+    /// Gracefully shuts down the connector, canceling all open orders for the given symbols.
+    /// This is called when the connector is about to exit.
+    fn shutdown(&self, symbols: Vec<String>) -> BoxFuture<'_, ()>;
 }
 
 /// Provides `orders` method to get the current working orders.

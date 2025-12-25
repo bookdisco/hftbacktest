@@ -399,8 +399,17 @@ where
         let order_id = order.order_id;
         instrument.orders.insert(order_id, order.clone());
 
+        info!(
+            %symbol,
+            order_id,
+            side = ?order.side,
+            price_tick = order.price_tick,
+            qty = order.qty,
+            "Bot sending order via IPC"
+        );
         self.channel
             .send(self.id, asset_no, LiveRequest::Order { symbol, order })?;
+        debug!("IPC send completed successfully");
 
         if wait {
             // fixme: timeout should be specified by the argument.

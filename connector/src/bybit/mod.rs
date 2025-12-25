@@ -8,7 +8,7 @@ use hftbacktest::types::{ErrorKind, LiveError, LiveEvent, Order, Value};
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::sync::{broadcast, broadcast::Sender, mpsc::UnboundedSender};
-use tracing::error;
+use tracing::{error, info};
 
 use crate::{
     bybit::{
@@ -357,5 +357,24 @@ impl Connector for Bybit {
                     .unwrap();
             }
         }
+    }
+
+    fn shutdown(&self, symbols: Vec<String>) -> crate::connector::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            info!("Shutting down Bybit connector, canceling all open orders...");
+            let category = &self.config.category;
+            for symbol in symbols {
+                info!(%symbol, %category, "Canceling all orders for symbol");
+                match self.client.cancel_all_orders(category, &symbol).await {
+                    Ok(()) => {
+                        info!(%symbol, "Successfully canceled all orders");
+                    }
+                    Err(error) => {
+                        error!(%symbol, ?error, "Failed to cancel all orders");
+                    }
+                }
+            }
+            info!("Bybit connector shutdown complete");
+        })
     }
 }

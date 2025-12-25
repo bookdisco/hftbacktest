@@ -18,7 +18,7 @@ use serde::Deserialize;
 use thiserror::Error;
 use tokio::sync::{broadcast, broadcast::Sender, mpsc::UnboundedSender};
 use tokio_tungstenite::tungstenite;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     binancefutures::{
@@ -238,6 +238,15 @@ impl Connector for BinanceFutures {
         let client = self.client.clone();
         let order_manager = self.order_manager.clone();
 
+        info!(
+            %symbol,
+            order_id = order.order_id,
+            side = ?order.side,
+            price_tick = order.price_tick,
+            qty = order.qty,
+            "Submit order request received from bot"
+        );
+
         tokio::spawn(async move {
             let client_order_id = order_manager
                 .lock()
@@ -246,12 +255,22 @@ impl Connector for BinanceFutures {
 
             match client_order_id {
                 Some(client_order_id) => {
+                    let price = order.price_tick as f64 * order.tick_size;
+                    info!(
+                        %symbol,
+                        %client_order_id,
+                        order_id = order.order_id,
+                        side = ?order.side,
+                        %price,
+                        qty = order.qty,
+                        "Submitting order to exchange"
+                    );
                     let result = client
                         .submit_order(
                             &client_order_id,
                             &symbol,
                             order.side,
-                            order.price_tick as f64 * order.tick_size,
+                            price,
                             get_precision(order.tick_size),
                             order.qty,
                             order.order_type,
@@ -260,6 +279,12 @@ impl Connector for BinanceFutures {
                         .await;
                     match result {
                         Ok(resp) => {
+                            info!(
+                                %symbol,
+                                %client_order_id,
+                                "Order submitted successfully: {:?}",
+                                resp
+                            );
                             if let Some(order) = order_manager
                                 .lock()
                                 .unwrap()
@@ -273,6 +298,12 @@ impl Connector for BinanceFutures {
                             }
                         }
                         Err(error) => {
+                            error!(
+                                %symbol,
+                                %client_order_id,
+                                "Order submission failed: {:?}",
+                                error
+                            );
                             if let Some(order) = order_manager
                                 .lock()
                                 .unwrap()
@@ -365,5 +396,23 @@ impl Connector for BinanceFutures {
                 }
             }
         });
+    }
+
+    fn shutdown(&self, symbols: Vec<String>) -> crate::connector::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            info!("Shutting down BinanceFutures connector, canceling all open orders...");
+            for symbol in symbols {
+                info!(%symbol, "Canceling all orders for symbol");
+                match self.client.cancel_all_orders(&symbol).await {
+                    Ok(()) => {
+                        info!(%symbol, "Successfully canceled all orders");
+                    }
+                    Err(error) => {
+                        error!(%symbol, ?error, "Failed to cancel all orders");
+                    }
+                }
+            }
+            info!("BinanceFutures connector shutdown complete");
+        })
     }
 }

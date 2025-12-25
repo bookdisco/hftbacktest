@@ -17,7 +17,7 @@ use serde::Deserialize;
 use thiserror::Error;
 use tokio::sync::{broadcast, broadcast::Sender, mpsc::UnboundedSender};
 use tokio_tungstenite::tungstenite;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{
     binancespot::{
@@ -368,5 +368,23 @@ impl Connector for BinanceSpot {
                 }
             }
         });
+    }
+
+    fn shutdown(&self, symbols: Vec<String>) -> crate::connector::BoxFuture<'_, ()> {
+        Box::pin(async move {
+            info!("Shutting down BinanceSpot connector, canceling all open orders...");
+            for symbol in symbols {
+                info!(%symbol, "Canceling all orders for symbol");
+                match self.client.cancel_all_orders(&symbol).await {
+                    Ok(()) => {
+                        info!(%symbol, "Successfully canceled all orders");
+                    }
+                    Err(error) => {
+                        error!(%symbol, ?error, "Failed to cancel all orders");
+                    }
+                }
+            }
+            info!("BinanceSpot connector shutdown complete");
+        })
     }
 }

@@ -67,24 +67,24 @@ impl UserDataStream {
             }
             EventStream::AccountUpdate(data) => {
                 for position in data.account.position {
-                    self.ev_tx
+                    // Ignore send errors during shutdown
+                    let _ = self.ev_tx
                         .send(PublishEvent::LiveEvent(LiveEvent::Position {
                             symbol: position.symbol,
                             qty: position.position_amount,
                             exch_ts: data.transaction_time * 1_000_000,
-                        }))
-                        .unwrap();
+                        }));
                 }
             }
             EventStream::OrderTradeUpdate(data) => {
                 match self.order_manager.lock().unwrap().update_from_ws(&data) {
                     Ok(Some(order)) => {
-                        self.ev_tx
+                        // Ignore send errors during shutdown
+                        let _ = self.ev_tx
                             .send(PublishEvent::LiveEvent(LiveEvent::Order {
                                 symbol: data.order.symbol,
                                 order,
-                            }))
-                            .unwrap();
+                            }));
                     }
                     Ok(None) => {
                         // This order is already deleted.
@@ -243,12 +243,12 @@ pub async fn cancel_all(
     client.cancel_all_um_orders(&symbol).await?;
     let orders = order_manager.lock().unwrap().cancel_all_from_rest(&symbol);
     for order in orders {
-        ev_tx
+        // Ignore send errors during shutdown
+        let _ = ev_tx
             .send(PublishEvent::LiveEvent(LiveEvent::Order {
                 symbol: symbol.clone(),
                 order,
-            }))
-            .unwrap();
+            }));
     }
     Ok(())
 }
@@ -261,22 +261,22 @@ pub async fn get_position_information(
     let position_information = client.get_um_position_risk().await?;
     position_information.into_iter().for_each(|position| {
         symbols.remove(&position.symbol);
-        ev_tx
+        // Ignore send errors during shutdown
+        let _ = ev_tx
             .send(PublishEvent::LiveEvent(LiveEvent::Position {
                 symbol: position.symbol,
                 qty: position.position_amount,
                 exch_ts: position.update_time * 1_000_000,
-            }))
-            .unwrap();
+            }));
     });
     for symbol in symbols {
-        ev_tx
+        // Ignore send errors during shutdown
+        let _ = ev_tx
             .send(PublishEvent::LiveEvent(LiveEvent::Position {
                 symbol,
                 qty: 0.0,
                 exch_ts: 0,
-            }))
-            .unwrap();
+            }));
     }
     Ok(())
 }

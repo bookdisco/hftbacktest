@@ -17,8 +17,8 @@ use hftbacktest::{
     prelude::*,
 };
 use iceoryx2::{
-    node::NodeBuilder,
-    prelude::{SignalHandlingMode, ipc},
+    node::{NodeBuilder, NodeState, NodeView},
+    prelude::{CallbackProgression, Config, SignalHandlingMode, ipc},
 };
 use tokio::{
     runtime::Builder,
@@ -29,7 +29,7 @@ use tokio::{
         mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
     },
 };
-use tracing::error;
+use tracing::{debug, error, info};
 
 use connector::{
     binancefutures::BinanceFutures,
@@ -48,27 +48,43 @@ fn run_receive_task(
     name: &str,
     tx: UnboundedSender<PublishEvent>,
     connector: &mut Box<dyn Connector>,
+    registered_symbols: Arc<Mutex<Vec<String>>>,
 ) -> Result<(), ChannelError> {
     let node = NodeBuilder::new()
         .signal_handling_mode(SignalHandlingMode::Disabled)
         .create::<ipc::Service>()
         .map_err(|error| ChannelError::BuildError(error.to_string()))?;
     let bot_rx = IceoryxBuilder::new(name).bot(false).receiver()?;
+    info!("Connector receive task started, listening for bot requests...");
     loop {
         let cycle_time = Duration::from_nanos(1000);
         match node.wait(cycle_time) {
             Ok(()) => {
                 while let Some((id, ev)) = bot_rx.receive()? {
+                    debug!(bot_id = id, "Received request from bot");
                     match ev {
                         LiveRequest::Order {
                             symbol: asset,
                             order,
                         } => match order.req {
                             Status::New => {
+                                info!(
+                                    %asset,
+                                    order_id = order.order_id,
+                                    side = ?order.side,
+                                    price_tick = order.price_tick,
+                                    qty = order.qty,
+                                    "Received NEW order request from bot"
+                                );
                                 // Requests to the Connector submit the new order.
                                 connector.submit(asset, order, tx.clone());
                             }
                             Status::Canceled => {
+                                info!(
+                                    %asset,
+                                    order_id = order.order_id,
+                                    "Received CANCEL order request from bot"
+                                );
                                 // Requests to the Connector cancel the order.
                                 connector.cancel(asset, order, tx.clone());
                             }
@@ -81,6 +97,14 @@ fn run_receive_task(
                             tick_size,
                             lot_size,
                         } => {
+                            info!(
+                                %symbol,
+                                %tick_size,
+                                %lot_size,
+                                "Received RegisterInstrument request from bot"
+                            );
+                            // Track registered symbols for cleanup
+                            registered_symbols.lock().unwrap().push(symbol.clone());
                             // Makes prepare the publisher thread to also add the instrument.
                             tx.send(PublishEvent::RegisterInstrument {
                                 id,
@@ -102,6 +126,23 @@ fn run_receive_task(
         }
     }
     Ok(())
+}
+
+/// Clean up stale IPC resources from dead nodes
+fn cleanup_stale_ipc_resources() {
+    info!("Cleaning up stale IPC resources...");
+    if let Err(e) = iceoryx2::node::Node::<ipc::Service>::list(Config::global_config(), |node_state| {
+        if let NodeState::<ipc::Service>::Dead(view) = node_state {
+            info!("Found dead node, cleaning up resources: {:?}", view.id());
+            if let Err(e) = view.remove_stale_resources() {
+                error!("Failed to cleanup stale resources: {:?}", e);
+            }
+        }
+        CallbackProgression::Continue
+    }) {
+        error!("Failed to list nodes for cleanup: {:?}", e);
+    }
+    info!("IPC cleanup complete");
 }
 
 async fn run_publish_task(
@@ -415,6 +456,12 @@ async fn main() {
         }
     };
 
+    // Clean up any stale IPC resources from previous runs
+    cleanup_stale_ipc_resources();
+
+    // Track registered symbols for cleanup on shutdown
+    let registered_symbols: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
     let name = args.name.clone();
     let order_manager = connector.order_manager();
     let handle = thread::spawn(move || {
@@ -439,7 +486,8 @@ async fn main() {
     thread::sleep(Duration::from_millis(50));
 
     let name = args.name;
-    run_receive_task(&name, pub_tx, &mut connector)
+    let symbols_for_cleanup = registered_symbols.clone();
+    run_receive_task(&name, pub_tx, &mut connector, registered_symbols)
         .map_err(|error| {
             error!(
                 ?error,
@@ -447,5 +495,22 @@ async fn main() {
             );
         })
         .unwrap();
+
+    // Graceful shutdown: cancel all open orders
+    info!("Shutting down connector...");
+    let symbols = symbols_for_cleanup.lock().unwrap().clone();
+    if !symbols.is_empty() {
+        // Use block_in_place to allow blocking in async context
+        tokio::task::block_in_place(|| {
+            tokio::runtime::Handle::current().block_on(async {
+                connector.shutdown(symbols).await;
+            });
+        });
+    }
+
+    // Clean up IPC resources
+    cleanup_stale_ipc_resources();
+
     let _ = handle.join();
+    info!("Connector shutdown complete");
 }

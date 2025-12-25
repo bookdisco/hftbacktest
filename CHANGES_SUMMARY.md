@@ -1007,3 +1007,180 @@ hftbacktest/src/data/mod.rs
    - CM Futures 订单支持
    - Margin 订单支持
    - 更多账户信息查询
+
+---
+
+## 16. Connector 优雅关闭 (Graceful Shutdown)
+
+### 背景
+在 connector 关闭时（如 Ctrl+C），需要：
+1. 自动撤销所有未成交订单
+2. 清理 IPC 共享内存（iceoryx2）
+3. 避免关闭时的 SendError panic
+
+### 实现
+
+#### 1. 添加 `shutdown` 方法到 Connector trait
+
+**文件:** `connector/src/connector.rs`
+
+```rust
+/// BoxFuture 类型别名，用于 trait object 中的异步方法
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+pub trait Connector {
+    // ... 其他方法 ...
+
+    /// 优雅关闭 connector，撤销所有已注册交易对的订单
+    fn shutdown(&self, symbols: Vec<String>) -> BoxFuture<'_, ()>;
+}
+```
+
+#### 2. 各 Connector 实现 shutdown
+
+**文件:**
+- `connector/src/binancefutures/mod.rs`
+- `connector/src/binancespot/mod.rs`
+- `connector/src/binancepapi/mod.rs`
+- `connector/src/bybit/mod.rs`
+
+```rust
+fn shutdown(&self, symbols: Vec<String>) -> crate::connector::BoxFuture<'_, ()> {
+    Box::pin(async move {
+        info!("Shutting down connector, canceling all open orders...");
+        for symbol in symbols {
+            info!(%symbol, "Canceling all orders for symbol");
+            match self.client.cancel_all_orders(&symbol).await {
+                Ok(()) => info!(%symbol, "Successfully canceled all orders"),
+                Err(error) => error!(%symbol, ?error, "Failed to cancel all orders"),
+            }
+        }
+        info!("Connector shutdown complete");
+    })
+}
+```
+
+#### 3. IPC 资源清理
+
+**文件:** `connector/src/main.rs`
+
+```rust
+use iceoryx2::node::{NodeState, NodeView};
+
+/// 清理死节点的 IPC 资源
+fn cleanup_stale_ipc_resources() {
+    info!("Cleaning up stale IPC resources...");
+    if let Err(e) = iceoryx2::node::Node::<ipc::Service>::list(
+        Config::global_config(),
+        |node_state| {
+            if let NodeState::<ipc::Service>::Dead(view) = node_state {
+                info!("Found dead node, cleaning up resources: {:?}", view.id());
+                if let Err(e) = view.remove_stale_resources() {
+                    error!("Failed to cleanup stale resources: {:?}", e);
+                }
+            }
+            CallbackProgression::Continue
+        },
+    ) {
+        error!("Failed to list nodes for cleanup: {:?}", e);
+    }
+    info!("IPC cleanup complete");
+}
+```
+
+**主函数修改:**
+
+```rust
+// 跟踪已注册的交易对，用于关闭时撤单
+let registered_symbols: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+// ... 运行任务 ...
+
+// 优雅关闭：撤销所有订单
+info!("Shutting down connector...");
+let symbols = symbols_for_cleanup.lock().unwrap().clone();
+if !symbols.is_empty() {
+    tokio::task::block_in_place(|| {
+        tokio::runtime::Handle::current().block_on(async {
+            connector.shutdown(symbols).await;
+        });
+    });
+}
+
+// 清理 IPC 资源
+cleanup_stale_ipc_resources();
+```
+
+#### 4. 修复 SendError panic
+
+**问题:** 关闭时 channel 接收端已关闭，`ev_tx.send().unwrap()` 会 panic。
+
+**解决:** 将所有 `.unwrap()` 改为 `let _ = ...`
+
+**文件:**
+- `connector/src/binancefutures/user_data_stream.rs`
+- `connector/src/binancespot/user_data_stream.rs`
+- `connector/src/binancepapi/user_data_stream.rs`
+
+**修改的函数:**
+- `process_message()` - 处理 AccountUpdate/OrderTradeUpdate
+- `cancel_all()` - 撤销订单
+- `get_position_information()` - 获取初始持仓
+
+```rust
+// 修改前
+self.ev_tx.send(PublishEvent::LiveEvent(...)).unwrap();
+
+// 修改后
+// Ignore send errors during shutdown
+let _ = self.ev_tx.send(PublishEvent::LiveEvent(...));
+```
+
+### 技术要点
+
+#### BoxFuture 模式
+trait object (`dyn Connector`) 不能使用 `impl Future` 返回类型，需要用 `BoxFuture`:
+```rust
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+```
+
+#### 避免 Runtime 嵌套
+在 async context 中调用 `block_on` 会 panic，需要使用 `block_in_place`:
+```rust
+tokio::task::block_in_place(|| {
+    tokio::runtime::Handle::current().block_on(async {
+        // async code here
+    });
+});
+```
+
+### 测试结果
+
+```
+INFO connector: Received RegisterInstrument request from bot symbol=btcusdt
+...
+INFO connector: Shutting down connector...
+INFO connector::binancefutures: Canceling all orders for symbol symbol=btcusdt
+INFO connector::binancefutures: Successfully canceled all orders symbol=btcusdt
+INFO connector::binancefutures: BinanceFutures connector shutdown complete
+INFO connector: Cleaning up stale IPC resources...
+INFO connector: IPC cleanup complete
+INFO connector: Connector shutdown complete
+```
+
+无 panic，所有订单已撤销，IPC 资源已清理。
+
+### 文件变更
+
+**修改文件:**
+```
+connector/src/connector.rs                    # 添加 BoxFuture 和 shutdown 方法
+connector/src/main.rs                         # 添加 IPC 清理和关闭逻辑
+connector/src/binancefutures/mod.rs           # 实现 shutdown
+connector/src/binancefutures/user_data_stream.rs  # 修复 unwrap panic
+connector/src/binancespot/mod.rs              # 实现 shutdown
+connector/src/binancespot/user_data_stream.rs # 修复 unwrap panic
+connector/src/binancepapi/mod.rs              # 实现 shutdown
+connector/src/binancepapi/user_data_stream.rs # 修复 unwrap panic
+connector/src/bybit/mod.rs                    # 实现 shutdown
+```

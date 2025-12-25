@@ -71,25 +71,25 @@ impl UserDataStream {
             UserEventStream::OutboundAccountPosition(data) => {
                 let event_time = data.event_time;
                 for balance in data.balances {
-                    self.ev_tx
+                    // Ignore send errors during shutdown
+                    let _ = self.ev_tx
                         .send(PublishEvent::LiveEvent(LiveEvent::Position {
                             symbol: balance.asset,
                             qty: balance.free,
                             exch_ts: event_time * 1_000_000,
-                        }))
-                        .unwrap();
+                        }));
                 }
             }
             UserEventStream::BalanceUpdate(_data) => {}
             UserEventStream::ExecutionReport(data) => {
                 match self.order_manager.lock().unwrap().update_from_ws(&data) {
                     Ok(Some(order)) => {
-                        self.ev_tx
+                        // Ignore send errors during shutdown
+                        let _ = self.ev_tx
                             .send(PublishEvent::LiveEvent(LiveEvent::Order {
                                 symbol: data.symbol.clone(),
                                 order,
-                            }))
-                            .unwrap();
+                            }));
                     }
                     Ok(None) => {
                         // order已经删除
@@ -258,12 +258,12 @@ pub async fn cancel_all(
     client.cancel_all_orders(&symbol).await?;
     let orders = order_manager.lock().unwrap().cancel_all_from_rest(&symbol);
     for order in orders {
-        ev_tx
+        // Ignore send errors during shutdown
+        let _ = ev_tx
             .send(PublishEvent::LiveEvent(LiveEvent::Order {
                 symbol: symbol.clone(),
                 order,
-            }))
-            .unwrap();
+            }));
     }
     Ok(())
 }
@@ -278,22 +278,22 @@ pub async fn get_position_information(
     let exch_ts = account_infomation.update_time * 1_000_000;
     account_infomation.balances.into_iter().for_each(|balance| {
         symbols.remove(&balance.asset);
-        ev_tx
+        // Ignore send errors during shutdown
+        let _ = ev_tx
             .send(PublishEvent::LiveEvent(LiveEvent::Position {
                 symbol: balance.asset,
                 qty: balance.free,
                 exch_ts,
-            }))
-            .unwrap();
+            }));
     });
     for symbol in symbols {
-        ev_tx
+        // Ignore send errors during shutdown
+        let _ = ev_tx
             .send(PublishEvent::LiveEvent(LiveEvent::Position {
                 symbol,
                 qty: 0.0,
                 exch_ts: 0,
-            }))
-            .unwrap();
+            }));
     }
     Ok(())
 }
