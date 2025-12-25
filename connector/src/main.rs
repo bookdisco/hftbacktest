@@ -33,6 +33,7 @@ use tracing::error;
 
 use connector::{
     binancefutures::BinanceFutures,
+    binancepapi::BinancePapi,
     binancespot::BinanceSpot,
     bybit::Bybit,
     connector::{Connector, ConnectorBuilder, GetOrders, PublishEvent},
@@ -313,6 +314,8 @@ struct Args {
 
     /// Connector
     /// * binancefutures: Binance USD-m Futures
+    /// * binancepapi: Binance Portfolio Margin (PAPI)
+    /// * binancespot: Binance Spot
     /// * bybit: Bybit Linear Futures
     connector: String,
 
@@ -391,7 +394,16 @@ async fn main() {
         "binancespot" => {
             let mut connector = BinanceSpot::build_from(&config)
                 .map_err(|error| {
-                    error!(?error, "Couldn't build the Bybit connector.");
+                    error!(?error, "Couldn't build the BinanceSpot connector.");
+                })
+                .unwrap();
+            connector.run(pub_tx.clone());
+            Box::new(connector)
+        }
+        "binancepapi" => {
+            let mut connector = BinancePapi::build_from(&config)
+                .map_err(|error| {
+                    error!(?error, "Couldn't build the BinancePapi connector.");
                 })
                 .unwrap();
             connector.run(pub_tx.clone());

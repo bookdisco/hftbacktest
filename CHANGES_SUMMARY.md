@@ -581,14 +581,429 @@ hftbacktest/src/data/mod.rs                          # 更新
 
 ---
 
-## 11. 后续工作
+## 11. IPC Collector 模式 (新增)
+
+### 背景
+在实盘交易场景中，connector 负责连接交易所进行交易，同时需要收集市场数据用于日志和分析。传统方式需要 collector 单独连接交易所 WebSocket，导致：
+- 重复的网络连接
+- 可能的数据不一致
+- 额外的 API 限制消耗
+
+IPC 模式允许 collector 订阅 connector 的市场数据流，通过 iceoryx2 共享内存实现零拷贝数据传输。
+
+### 架构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Binance Futures WebSocket                    │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                          Connector                               │
+│  - 连接交易所 WebSocket                                          │
+│  - 处理交易请求                                                   │
+│  - 通过 iceoryx2 发布市场数据                                     │
+│  - IPC 服务: {name}/ToBot, {name}/FromBot                        │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │ iceoryx2 shared memory
+                  ┌─────────────┴─────────────┐
+                  ▼                           ▼
+┌─────────────────────────┐     ┌─────────────────────────┐
+│     Trading Bot          │     │    IPC Collector         │
+│  - 订阅市场数据           │     │  - 订阅市场数据           │
+│  - 发送交易请求           │     │  - 转换为 JSON 存储       │
+│  - 执行策略              │     │  - 按日期轮转文件         │
+└─────────────────────────┘     └─────────────────────────┘
+```
+
+### 新增文件
+
+#### `collector/src/ipc_collector.rs`
+IPC 收集器实现（约 310 行）：
+
+```rust
+pub struct IpcCollector {
+    connector_name: String,
+    sender: IceoryxSender<LiveRequest>,
+    receiver: IceoryxReceiver<LiveEvent>,
+    node: Node<ipc::Service>,
+    writer_tx: UnboundedSender<(DateTime<Utc>, String, String)>,
+    symbols: Vec<String>,
+    event_count: u64,
+}
+
+impl IpcCollector {
+    /// 创建新的 IPC 收集器
+    pub fn new(
+        connector_name: String,
+        symbols: Vec<String>,
+        writer_tx: UnboundedSender<(DateTime<Utc>, String, String)>,
+    ) -> Result<Self, anyhow::Error>;
+
+    /// 注册交易对，触发 connector 订阅市场数据
+    pub fn register_symbols(&self) -> Result<(), anyhow::Error>;
+
+    /// 接收并处理市场数据事件
+    pub fn receive_events(&mut self) -> Result<(), anyhow::Error>;
+}
+
+/// 运行 IPC 收集
+pub async fn run_ipc_collection(
+    connector_name: String,
+    symbols: Vec<String>,
+    writer_tx: UnboundedSender<(DateTime<Utc>, String, String)>,
+) -> Result<(), anyhow::Error>;
+```
+
+事件处理：
+- `LiveEvent::Feed` → 转换为 JSON 格式存储
+- 支持 DEPTH_EVENT, DEPTH_SNAPSHOT_EVENT, TRADE_EVENT, DEPTH_BBO_EVENT
+- 自动生成与直接连接模式兼容的 JSON 格式
+
+### 修改文件
+
+#### `collector/Cargo.toml`
+添加 IPC 相关依赖：
+```toml
+# IPC mode: subscribe to connector's market data feed
+hftbacktest = { path = "../hftbacktest", default-features = false, features = ["live"] }
+iceoryx2 = { version = "0.6.1", features = ["logger_tracing"] }
+```
+
+#### `collector/src/error.rs`
+添加新错误类型：
+```rust
+#[error("IPC error: {0}")]
+IpcError(String),
+
+#[error("Channel error: {0}")]
+ChannelError(String),
+```
+
+#### `collector/src/main.rs`
+添加 `--ipc` 命令行参数：
+```rust
+#[arg(long)]
+ipc: Option<String>,
+
+// IPC mode: subscribe to connector's market data feed
+let _handle = if let Some(connector_name) = args.ipc {
+    if args.symbols.is_empty() {
+        return Err(anyhow!("At least one symbol is required for IPC mode..."));
+    }
+    tokio::spawn(ipc_collector::run_ipc_collection(
+        connector_name,
+        args.symbols,
+        writer_tx,
+    ))
+} else {
+    // Direct connection mode (existing behavior)
+    ...
+};
+```
+
+#### `connector/src/main.rs`
+修复 iceoryx2 节点创建竞态条件：
+```rust
+// Small delay to avoid race condition with iceoryx2 node creation.
+// When two threads create nodes simultaneously and one uses SignalHandlingMode::Disabled,
+// the node creation can fail with InternalError.
+thread::sleep(Duration::from_millis(50));
+```
+
+### Bug 修复
+
+#### iceoryx2 节点创建竞态条件
+**问题**：当两个线程同时创建 iceoryx2 节点，且其中一个使用 `SignalHandlingMode::Disabled` 时，节点创建会失败并返回 `NodeCreationFailure::InternalError`。
+
+**根本原因**：iceoryx2 内部的信号处理器注册存在线程安全问题。
+
+**解决方案**：在 `connector/src/main.rs` 中，spawn publish task 线程后添加 50ms 延迟，确保第一个节点创建完成后再创建第二个节点。
+
+### 使用示例
+
+```bash
+# Terminal 1: 启动 connector
+./target/release/connector bf binancefutures config.toml
+
+# Terminal 2: 启动 IPC collector
+# 注意: 使用空字符串作为交易所参数（IPC 模式不需要）
+./target/release/collector ./data "" btcusdt --ipc bf
+
+# 输出示例:
+# [IPC] Connecting to connector 'bf'...
+# [IPC] Registering 1 symbols...
+# [IPC] Listening for events...
+# [IPC] Received 2121 events
+```
+
+### 测试验证
+收集约 30 秒数据后：
+```
+事件统计:
+- depthSnapshot: 1936
+- depthUpdate: 128
+- trade: 57
+- 总计: 2121
+```
+
+注意：大量的 depthSnapshot 事件是正常的，因为初始订单簿快照会为每个价格档位生成一个事件。
+
+---
+
+## 12. 文件变更清单 (最终)
+
+### 新增文件
+```
+connector/src/lib.rs
+connector/src/binancefutures/orderbookmanager.rs
+connector/examples/binancefutures_orderbook_test.rs
+hftbacktest/src/data/mod.rs
+hftbacktest/src/data/tardis.rs
+hftbacktest/src/data/validation.rs
+hftbacktest/src/data/collector.rs
+hftbacktest/examples/tardis_convert.rs
+hftbacktest/examples/compare_tardis_converters.py
+hftbacktest/examples/convert_collector_data.rs
+hftbacktest/examples/collector_e2e_test.rs
+collector/src/ipc_collector.rs                       # 新增
+```
+
+### 修改文件
+```
+connector/Cargo.toml
+connector/src/binancefutures/mod.rs
+connector/src/binancefutures/market_data_stream.rs
+connector/src/utils.rs
+connector/src/bybit/mod.rs
+connector/src/main.rs                                # 更新 (iceoryx2 竞态修复)
+collector/Cargo.toml                                 # 更新 (IPC 依赖)
+collector/src/binancefuturesum/mod.rs
+collector/src/error.rs                               # 更新 (新错误类型)
+collector/src/main.rs                                # 更新 (--ipc 参数)
+hftbacktest/Cargo.toml
+hftbacktest/src/lib.rs
+hftbacktest/src/data/mod.rs
+```
+
+---
+
+## 13. Binance Portfolio Margin (PAPI) Connector (新增)
+
+### 背景
+Portfolio Margin (PM) 模式提供了统一保证金功能，可以同时进行 UM Futures、CM Futures 和 Margin 交易。本次实现添加了 PAPI connector，支持通过 PM 模式进行 UM Futures 交易。
+
+### PAPI 与普通 Futures 的主要区别
+
+| 项目 | USD-M Futures | Portfolio Margin (PAPI) |
+|------|---------------|-------------------------|
+| REST 基础 URL | `fapi.binance.com` | `papi.binance.com` |
+| 订单接口 | `/fapi/v1/order` | `/papi/v1/um/order` |
+| User Data Stream | `/ws/{listenKey}` | `/pm/ws/{listenKey}` |
+| ListenKey 接口 | `/fapi/v1/listenKey` | `/papi/v1/listenKey` |
+| 持仓接口 | `/fapi/v2/positionRisk` | `/papi/v1/um/positionRisk` |
+| 余额接口 | (账户信息内) | `/papi/v1/balance` |
+
+### 新增文件
+
+#### `connector/src/binancepapi/`
+完整的 PAPI connector 实现：
+
+```
+connector/src/binancepapi/
+├── mod.rs                  # 主模块，实现 Connector trait
+├── msg/
+│   ├── mod.rs              # 消息类型定义
+│   ├── rest.rs             # REST API 响应结构
+│   └── stream.rs           # WebSocket 流消息结构
+├── rest.rs                 # PAPI REST 客户端
+├── ordermanager.rs         # 订单状态管理
+├── user_data_stream.rs     # 用户数据流（订单/持仓更新）
+└── market_data_stream.rs   # 行情数据流
+```
+
+#### `connector/src/binancepapi/rest.rs`
+PAPI REST 客户端实现：
+
+```rust
+pub struct BinancePapiClient {
+    api_url: String,  // https://papi.binance.com
+    api_key: String,
+    secret: String,
+}
+
+impl BinancePapiClient {
+    // ListenKey 管理
+    pub async fn start_user_data_stream(&self) -> Result<String, Error>;
+    pub async fn keepalive_user_data_stream(&self) -> Result<(), Error>;
+
+    // UM Futures 订单操作
+    pub async fn submit_um_order(...) -> Result<OrderResponse, Error>;
+    pub async fn modify_um_order(...) -> Result<OrderResponse, Error>;
+    pub async fn cancel_um_order(...) -> Result<OrderResponse, Error>;
+    pub async fn cancel_all_um_orders(&self, symbol: &str) -> Result<(), Error>;
+
+    // 账户信息
+    pub async fn get_account_info(&self) -> Result<AccountInfo, Error>;
+    pub async fn get_balance(&self) -> Result<Vec<Balance>, Error>;
+    pub async fn get_um_position_risk(&self) -> Result<Vec<UmPositionRisk>, Error>;
+}
+```
+
+#### `connector/examples/binancepapi.toml`
+PAPI 配置示例：
+
+```toml
+# Binance Portfolio Margin (PAPI) Configuration
+api_url = "https://papi.binance.com"
+stream_url = "wss://fstream.binance.com/ws"
+user_stream_url = "wss://fstream.binance.com/pm/ws"
+
+order_prefix = "papi"
+api_key = ""
+secret = ""
+```
+
+### 修改文件
+
+#### `connector/Cargo.toml`
+添加 binancepapi feature：
+```toml
+[features]
+default = ["binancefutures", "binancepapi", "binancespot", "bybit"]
+binancepapi = ["binancefutures"]  # PAPI 复用 binancefutures 的 orderbookmanager
+```
+
+#### `connector/src/lib.rs`
+添加 binancepapi 模块导出：
+```rust
+#[cfg(feature = "binancepapi")]
+pub mod binancepapi;
+```
+
+#### `connector/src/main.rs`
+添加 binancepapi connector 支持：
+```rust
+"binancepapi" => {
+    let mut connector = BinancePapi::build_from(&config)
+        .map_err(|error| {
+            error!(?error, "Couldn't build the BinancePapi connector.");
+        })
+        .unwrap();
+    connector.run(pub_tx.clone());
+    Box::new(connector)
+}
+```
+
+### 测试网 URL 更新
+
+同时更新了 Binance Futures 和 Spot 的测试网配置：
+
+#### `connector/examples/binancefutures.toml`
+```toml
+# Testnet URL 更新
+api_url = "https://demo-fapi.binance.com"  # 旧: testnet.binancefuture.com
+stream_url = "wss://fstream.binancefuture.com/ws"
+```
+
+### 使用示例
+
+```bash
+# 编译 connector
+cargo build --release -p connector
+
+# 使用 PAPI connector
+./target/release/connector papi binancepapi ./papi_config.toml
+```
+
+### 注意事项
+
+1. **无测试网**：PAPI 没有官方测试网，请在正式环境测试时使用小额资金。
+
+2. **市场数据**：PAPI 使用与 UM Futures 相同的市场数据流 (`wss://fstream.binance.com/ws`)。
+
+3. **用户数据流**：PAPI 使用特殊的 `/pm` 路径 (`wss://fstream.binance.com/pm/ws/{listenKey}`)。
+
+4. **ListenKey 管理**：
+   - 有效期 60 分钟
+   - 每 30 分钟自动 keepalive
+   - 连接有效期 24 小时
+
+---
+
+## 14. 文件变更清单 (最终)
+
+### 新增文件
+```
+connector/src/lib.rs
+connector/src/binancefutures/orderbookmanager.rs
+connector/examples/binancefutures_orderbook_test.rs
+connector/src/binancepapi/                           # 新增目录
+connector/src/binancepapi/mod.rs                     # 新增
+connector/src/binancepapi/rest.rs                    # 新增
+connector/src/binancepapi/ordermanager.rs            # 新增
+connector/src/binancepapi/user_data_stream.rs        # 新增
+connector/src/binancepapi/market_data_stream.rs      # 新增
+connector/src/binancepapi/msg/mod.rs                 # 新增
+connector/src/binancepapi/msg/rest.rs                # 新增
+connector/src/binancepapi/msg/stream.rs              # 新增
+connector/examples/binancepapi.toml                  # 新增
+hftbacktest/src/data/mod.rs
+hftbacktest/src/data/tardis.rs
+hftbacktest/src/data/validation.rs
+hftbacktest/src/data/collector.rs
+hftbacktest/examples/tardis_convert.rs
+hftbacktest/examples/compare_tardis_converters.py
+hftbacktest/examples/convert_collector_data.rs
+hftbacktest/examples/collector_e2e_test.rs
+collector/src/ipc_collector.rs
+```
+
+### 修改文件
+```
+connector/Cargo.toml                                 # 更新 (binancepapi feature)
+connector/src/lib.rs                                 # 更新 (binancepapi 模块)
+connector/src/binancefutures/mod.rs
+connector/src/binancefutures/market_data_stream.rs
+connector/src/utils.rs
+connector/src/bybit/mod.rs
+connector/src/main.rs                                # 更新 (binancepapi connector)
+connector/examples/binancefutures.toml               # 更新 (testnet URL)
+connector/examples/binancespot.toml                  # 更新 (testnet URL)
+collector/Cargo.toml
+collector/src/binancefuturesum/mod.rs
+collector/src/error.rs
+collector/src/main.rs
+hftbacktest/Cargo.toml
+hftbacktest/src/lib.rs
+hftbacktest/src/data/mod.rs
+```
+
+---
+
+## 15. 后续工作
 
 1. ~~**Collector JSON → Event 转换器**~~：✓ 已完成
 
-2. **Rust 性能优化**：使用 `csv` 或 `polars-rs` crate 提升 CSV 解析性能。
+2. ~~**IPC Collector 模式**~~：✓ 已完成
 
-3. ~~**集成测试**~~：✓ 已完成，使用真实 Binance 数据验证了完整流程。
+3. ~~**Binance Portfolio Margin (PAPI) Connector**~~：✓ 已完成
 
-4. **长时间数据收集测试**：验证 collector 在长时间运行下的稳定性和数据完整性。
+4. **Rust 性能优化**：使用 `csv` 或 `polars-rs` crate 提升 CSV 解析性能。
 
-5. **多交易对支持**：测试同时收集多个交易对的数据。
+5. ~~**集成测试**~~：✓ 已完成，使用真实 Binance 数据验证了完整流程。
+
+6. **长时间数据收集测试**：验证 collector 在长时间运行下的稳定性和数据完整性。
+
+7. **多交易对支持**：测试同时收集多个交易对的数据。
+
+8. **IPC 收集器增强**：
+   - 支持从多个 connector 订阅
+   - 自动重连机制
+   - 更详细的统计信息
+
+9. **PAPI 功能扩展**：
+   - CM Futures 订单支持
+   - Margin 订单支持
+   - 更多账户信息查询

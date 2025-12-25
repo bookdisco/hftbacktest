@@ -1,12 +1,18 @@
-# Testnet: wss://fstream.binancefuture.com/ws
-# Mainnet: wss://fstream.binance.com/ws
-# Private: wss://fstream-auth.binance.com/ws
-# Low-Latency Market Maker: wss://fstream-mm.binance.com/ws
+# Spot Configuration
+#
+# Testnet:
+#   stream_url = "wss://stream.testnet.binance.vision/ws"
+#   ws_api_url = "wss://ws-api.testnet.binance.vision/ws-api/v3"
+#   api_url = "https://testnet.binance.vision"
+#
+# Mainnet:
+#   stream_url = "wss://stream.binance.com:9443/ws"
+#   ws_api_url = "wss://ws-api.binance.com:443/ws-api/v3"
+#   api_url = "https://api.binance.com"
+
+# Current: Testnet
 stream_url = "wss://stream.testnet.binance.vision/ws"
 ws_api_url = "wss://ws-api.testnet.binance.vision/ws-api/v3"
-# Testnet: https://testnet.binancefuture.com
-# Mainnet: https://fapi.binance.com
-# Low-Latency Market Maker: https://fapi-mm.binance.com
 api_url = "https://testnet.binance.vision"
 
 order_prefix = "test"

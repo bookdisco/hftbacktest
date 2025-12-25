@@ -4,6 +4,8 @@
 
 #[cfg(feature = "binancefutures")]
 pub mod binancefutures;
+#[cfg(feature = "binancepapi")]
+pub mod binancepapi;
 #[cfg(feature = "binancespot")]
 pub mod binancespot;
 #[cfg(feature = "bybit")]

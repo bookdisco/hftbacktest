@@ -1,0 +1,20 @@
+# Binance Portfolio Margin (PAPI) Configuration
+#
+# PAPI provides unified margin for UM Futures, CM Futures, and Margin trading.
+# This connector supports UM Futures trading through PAPI.
+#
+# Production:
+#   api_url = "https://papi.binance.com"
+#   stream_url = "wss://fstream.binance.com/ws"
+#   user_stream_url = "wss://fstream.binance.com/pm/ws"
+#
+# Note: PAPI doesn't have a testnet. Use binancefutures connector for testnet testing.
+
+# Current: Production
+api_url = "https://papi.binance.com"
+stream_url = "wss://fstream.binance.com/ws"
+user_stream_url = "wss://fstream.binance.com/pm/ws"
+
+order_prefix = "papi"
+api_key = ""
+secret = ""

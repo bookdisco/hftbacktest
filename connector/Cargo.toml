@@ -4,8 +4,9 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["binancefutures", "binancespot", "bybit"]
+default = ["binancefutures", "binancepapi", "binancespot", "bybit"]
 binancefutures = []
+binancepapi = ["binancefutures"]  # PAPI reuses orderbookmanager from binancefutures
 binancespot = []
 bybit = []
 

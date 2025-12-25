@@ -1,13 +1,20 @@
-# Testnet: wss://fstream.binancefuture.com/ws
-# Mainnet: wss://fstream.binance.com/ws
-# Private: wss://fstream-auth.binance.com/ws
-# Low-Latency Market Maker: wss://fstream-mm.binance.com/ws
-stream_url = "wss://fstream.binancefuture.com/ws"
+# USD-M Futures Configuration
+#
+# Testnet:
+#   stream_url = "wss://fstream.binancefuture.com/ws"
+#   api_url = "https://demo-fapi.binance.com"
+#
+# Mainnet:
+#   stream_url = "wss://fstream.binance.com/ws"
+#   api_url = "https://fapi.binance.com"
+#
+# Low-Latency Market Maker (Mainnet only):
+#   stream_url = "wss://fstream-mm.binance.com/ws"
+#   api_url = "https://fapi-mm.binance.com"
 
-# Testnet: https://testnet.binancefuture.com
-# Mainnet: https://fapi.binance.com
-# Low-Latency Market Maker: https://fapi-mm.binance.com
-api_url = "https://testnet.binancefuture.com"
+# Current: Testnet
+stream_url = "wss://fstream.binancefuture.com/ws"
+api_url = "https://demo-fapi.binance.com"
 
 order_prefix = "test"
 api_key = ""
