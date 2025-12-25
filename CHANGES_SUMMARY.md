@@ -320,10 +320,275 @@ hftbacktest/src/lib.rs
 
 ---
 
-## 7. 后续工作
+## 7. Collector 数据转换器 (新增)
 
-1. **Collector JSON → Event 转换器**：基于 Rust Tardis 转换器，直接将 Collector 收集的 JSON 数据转换为 Event 格式，跳过 Tardis CSV 中间格式。
+### 背景
+实现 Collector JSON 输出到 HftBacktest Event 格式的完整转换流程，跳过 Tardis CSV 中间格式的手动处理。
+
+### 新增文件
+
+#### `hftbacktest/src/data/collector.rs`
+Collector JSON 转换器：
+```rust
+pub struct CollectorConvertConfig {
+    pub include_snapshots: bool,  // 是否包含快照
+    pub exchange: String,         // 交易所名称，默认 "binance-futures"
+}
+
+pub struct ConversionStats {
+    pub trades: usize,
+    pub depth_updates: usize,
+    pub snapshot_entries: usize,
+    pub book_ticker_count: usize,
+    pub errors: usize,
+}
+
+/// 将 Collector JSON 转换为 Tardis CSV 格式
+pub fn convert_to_tardis_csv<P1, P2, P3>(
+    input_files: &[P1],
+    trades_output: P2,
+    depth_output: P3,
+    config: &CollectorConvertConfig,
+) -> Result<ConversionStats, String>;
+
+/// 将 Collector JSON 直接转换为 Event 格式
+#[cfg(feature = "backtest")]
+pub fn convert_collector_to_events<P: AsRef<Path>>(
+    input_files: &[P],
+    output_path: Option<P>,
+    config: &CollectorConvertConfig,
+) -> Result<(Vec<Event>, ConversionStats), String>;
+```
+
+支持的数据类型：
+- `@trade` - 交易数据
+- `@depth@0ms` - 深度更新
+- REST 快照 - 订单簿快照
+
+#### `hftbacktest/examples/convert_collector_data.rs`
+简单的数据转换和验证工具：
+```bash
+cargo run --release --example convert_collector_data -- <input.gz> [output.npz]
+```
+
+#### `hftbacktest/examples/collector_e2e_test.rs`
+完整的端到端测试脚本，包含：
+- 自动启动 collector 收集数据
+- 转换为 Tardis CSV 和 Event NPZ
+- 数据验证（时间戳、价格、订单簿一致性）
+
+### 修改文件
+
+#### `hftbacktest/src/data/mod.rs`
+添加 collector 模块导出：
+```rust
+pub use collector::{CollectorConvertConfig, ConversionStats, convert_to_tardis_csv};
+#[cfg(feature = "backtest")]
+pub use collector::convert_collector_to_events;
+```
+
+#### `hftbacktest/Cargo.toml`
+添加依赖：
+```toml
+serde_json = "1.0"
+serde = { version = "1.0.228", features = ["derive"] }
+tempfile = { version = "3.20", optional = true }  # backtest feature
+
+[dev-dependencies]
+chrono = "0.4"
+```
+
+---
+
+## 8. 使用示例
+
+### 8.1 数据收集
+
+```bash
+# 编译 collector
+cargo build --release -p collector
+
+# 收集 Binance Futures BTCUSDT 数据
+# 参数: <输出目录> <交易所> <交易对>
+./target/release/collector ./data binancefuturesum btcusdt
+
+# 使用 Ctrl+C 停止收集
+# 输出文件: ./data/btcusdt_YYYYMMDD.gz
+```
+
+### 8.2 数据转换
+
+```bash
+# 编译转换工具
+cargo build --release --example convert_collector_data
+
+# 转换并验证
+cargo run --release --example convert_collector_data -- \
+    ./data/btcusdt_20251225.gz \
+    ./data/events.npz
+```
+
+输出示例：
+```
+=== Conversion Stats ===
+Trades: 114
+Depth updates: 12,489
+Snapshot entries: 2,000
+
+=== Event Stats ===
+Total events: 16,627
+Trade events: 118
+Depth events: 12,513
+Snapshot events: 4,000
+
+=== Price Range (trades) ===
+Min: 87,654.60
+Max: 87,918.90
+
+=== Latency Stats ===
+Min: 11.1 ms
+Max: 89.5 ms
+Avg: 31.0 ms
+
+=== Orderbook Validation ===
+Consistency errors: 0
+✓ Data validation passed!
+```
+
+### 8.3 端到端测试
+
+```bash
+# 自动收集 + 转换 + 验证 (30秒数据)
+cargo run --release --example collector_e2e_test -- \
+    --duration 30 \
+    --output ./test_data \
+    --symbol btcusdt
+
+# 使用已有数据（跳过收集）
+cargo run --release --example collector_e2e_test -- \
+    --skip-collect \
+    --output ./test_data
+```
+
+### 8.4 在 Python 中使用转换后的数据
+
+```python
+import numpy as np
+
+# 加载 NPZ 文件
+data = np.load('./data/events.npz')
+events = data['data']
+
+print(f"Total events: {len(events)}")
+print(f"Dtype: {events.dtype}")
+# [('ev', '<u8'), ('exch_ts', '<i8'), ('local_ts', '<i8'),
+#  ('px', '<f8'), ('qty', '<f8'), ('order_id', '<u8'),
+#  ('ival', '<i8'), ('fval', '<f8')]
+
+# 用于回测
+from hftbacktest import BacktestAsset, HashMapMarketDepthBacktest
+
+asset = (
+    BacktestAsset()
+        .data([events])
+        .tick_size(0.1)
+        .lot_size(0.001)
+        ...
+)
+```
+
+### 8.5 Tardis CSV 转换 (已有 Tardis 数据)
+
+```bash
+# 转换 Tardis.dev 下载的数据
+cargo run --release --example tardis_convert -- \
+    trades.csv.gz \
+    incremental_book_L2.csv.gz \
+    -o output.npz
+
+# 生成示例数据并测试
+cargo run --release --example tardis_convert -- --generate-sample
+```
+
+---
+
+## 9. 完整数据流
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Binance Futures WebSocket                    │
+│         @trade / @depth@0ms / @bookTicker + REST snapshot        │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                          Collector                               │
+│  - OrderBookManager 同步订单簿                                    │
+│  - 按日期轮转 gzip 压缩存储                                       │
+│  - 输出格式: {timestamp_nanos} {json}                            │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                    Collector Converter                           │
+│  collector.rs: JSON → Tardis CSV → Event[]                       │
+│  - 解析 trade, depth, snapshot                                   │
+│  - 校正延迟和事件顺序                                             │
+│  - 输出 .npz 文件                                                │
+└───────────────────────────────┬─────────────────────────────────┘
+                                │
+                                ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                      HftBacktest                                 │
+│  - BacktestAsset.data([events])                                  │
+│  - 支持回测和策略开发                                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## 10. 文件变更清单 (更新)
+
+### 新增文件
+```
+connector/src/lib.rs
+connector/src/binancefutures/orderbookmanager.rs
+connector/examples/binancefutures_orderbook_test.rs
+hftbacktest/src/data/mod.rs
+hftbacktest/src/data/tardis.rs
+hftbacktest/src/data/validation.rs
+hftbacktest/src/data/collector.rs                    # 新增
+hftbacktest/examples/tardis_convert.rs
+hftbacktest/examples/compare_tardis_converters.py
+hftbacktest/examples/convert_collector_data.rs       # 新增
+hftbacktest/examples/collector_e2e_test.rs           # 新增
+```
+
+### 修改文件
+```
+connector/Cargo.toml
+connector/src/binancefutures/mod.rs
+connector/src/binancefutures/market_data_stream.rs
+connector/src/utils.rs
+connector/src/bybit/mod.rs
+connector/src/main.rs
+collector/Cargo.toml
+collector/src/binancefuturesum/mod.rs
+hftbacktest/Cargo.toml                               # 更新
+hftbacktest/src/lib.rs
+hftbacktest/src/data/mod.rs                          # 更新
+```
+
+---
+
+## 11. 后续工作
+
+1. ~~**Collector JSON → Event 转换器**~~：✓ 已完成
 
 2. **Rust 性能优化**：使用 `csv` 或 `polars-rs` crate 提升 CSV 解析性能。
 
-3. **集成测试**：使用真实 Binance 数据测试完整的数据收集 → 转换 → 回测流程。
+3. ~~**集成测试**~~：✓ 已完成，使用真实 Binance 数据验证了完整流程。
+
+4. **长时间数据收集测试**：验证 collector 在长时间运行下的稳定性和数据完整性。
+
+5. **多交易对支持**：测试同时收集多个交易对的数据。
