@@ -40,3 +40,7 @@ ed25519-dalek = { version = "2.2.0", features = [
 ] }
 base64 = "0.22.1"
 serde_qs = "0.15.0"
+
+[[example]]
+name = "binancefutures_orderbook_test"
+required-features = ["binancefutures"]

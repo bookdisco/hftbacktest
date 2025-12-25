@@ -18,7 +18,7 @@ use crate::{
         trade_stream::OrderOp,
     },
     connector::{Connector, ConnectorBuilder, GetOrders, PublishEvent},
-    utils::{ExponentialBackoff, Retry},
+    utils::{ExponentialBackoff, ParseError, Retry},
 };
 
 #[allow(dead_code)]
@@ -65,6 +65,14 @@ pub enum BybitError {
     OpError(String),
     #[error("Config: {0:?}")]
     Config(#[from] toml::de::Error),
+}
+
+impl From<ParseError> for BybitError {
+    fn from(err: ParseError) -> Self {
+        match err {
+            ParseError::InvalidPxQty(e) => BybitError::InvalidPxQty(e),
+        }
+    }
 }
 
 impl BybitError {

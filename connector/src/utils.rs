@@ -3,6 +3,7 @@ use std::{
     fmt::{Debug, Write},
     future::Future,
     marker::PhantomData,
+    num::ParseFloatError,
     time::{Duration, Instant},
 };
 
@@ -20,8 +21,14 @@ use serde::{
     de::{Error, Visitor},
 };
 use sha2::Sha256;
+use thiserror::Error;
 
-use crate::bybit::BybitError;
+/// Generic parse error for price/quantity parsing
+#[derive(Error, Debug)]
+pub enum ParseError {
+    #[error("Invalid price or quantity: {0}")]
+    InvalidPxQty(#[from] ParseFloatError),
+}
 
 struct I64Visitor;
 
@@ -156,7 +163,7 @@ pub type PxQty = (f64, f64);
 pub fn parse_depth(
     bids: Vec<(String, String)>,
     asks: Vec<(String, String)>,
-) -> Result<(Vec<PxQty>, Vec<PxQty>), BybitError> {
+) -> Result<(Vec<PxQty>, Vec<PxQty>), ParseError> {
     let mut bids_ = Vec::with_capacity(bids.len());
     for (px, qty) in bids {
         bids_.push(parse_px_qty_tup(px, qty)?);
@@ -168,7 +175,7 @@ pub fn parse_depth(
     Ok((bids_, asks_))
 }
 
-pub fn parse_px_qty_tup(px: String, qty: String) -> Result<PxQty, BybitError> {
+pub fn parse_px_qty_tup(px: String, qty: String) -> Result<PxQty, ParseError> {
     Ok((px.parse()?, qty.parse()?))
 }
 

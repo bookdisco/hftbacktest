@@ -30,6 +30,9 @@
 #[cfg(any(feature = "backtest", doc))]
 pub mod backtest;
 
+/// Provides data conversion utilities.
+pub mod data;
+
 /// Provides market depth implementations.
 pub mod depth;
 

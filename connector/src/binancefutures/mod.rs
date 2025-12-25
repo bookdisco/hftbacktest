@@ -1,7 +1,8 @@
 mod market_data_stream;
-mod msg;
+pub mod msg;
+pub mod orderbookmanager;
 mod ordermanager;
-mod rest;
+pub mod rest;
 mod user_data_stream;
 
 use std::{

@@ -21,3 +21,6 @@ hmac = "0.12.1"
 thiserror = "2.0.17"
 flate2 = "1.1.5"
 clap = { version = "4.5.53", features = ["derive"] }
+
+# Reuse connector's orderbookmanager and msg types
+connector = { path = "../connector", default-features = false, features = ["binancefutures"] }
