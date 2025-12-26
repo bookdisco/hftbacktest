@@ -2,11 +2,17 @@
 //!
 //! This module contains the stateless strategy logic that can be used
 //! with both backtesting and live trading.
+//!
+//! This strategy uses the `factor-engine` crate for all factor computations,
+//! providing O(1) streaming calculations for:
+//! - Order Book Imbalance (OBI) with z-score normalization
+//! - Rolling volatility from price returns
+//! - Stop loss detection based on volatility/change thresholds
 
 use std::collections::HashMap;
 
 use factor_engine::factors::stop_loss::StopLossStatus;
-use factor_engine::primitives::WelfordRolling;
+use factor_engine::factors::Factor;
 use factor_engine::{OBIFactor, StopLossChecker, VolatilityFactor};
 use hftbacktest::prelude::*;
 
@@ -16,18 +22,18 @@ use crate::config::{GlobalConfig, StopLossConfig, StrategyParams};
 ///
 /// This strategy uses Order Book Imbalance as the alpha signal to adjust
 /// the fair price, with volatility-based spread adjustment and stop loss protection.
+///
+/// All factor computations are delegated to the `factor-engine` crate.
 pub struct ObiMmStrategy {
     /// Global configuration
     pub global: GlobalConfig,
     /// Strategy parameters
     pub params: StrategyParams,
-    /// OBI factor (unused, kept for compatibility)
+    /// OBI factor from factor-engine (O(1) z-score computation)
     pub obi_factor: OBIFactor,
-    /// OBI Welford rolling statistics for z-score
-    obi_welford: WelfordRolling,
-    /// Volatility factor
+    /// Volatility factor from factor-engine (O(1) rolling std)
     pub volatility_factor: VolatilityFactor,
-    /// Stop loss checker
+    /// Stop loss checker from factor-engine
     pub stop_loss: StopLossChecker,
     /// Last check period
     last_check_period: i64,
@@ -39,14 +45,12 @@ pub struct ObiMmStrategy {
     minute_change: f64,
     /// Tick size
     tick_size: f64,
-    /// ROI lower bound tick
-    roi_lb_tick: i64,
-    /// ROI upper bound tick
-    roi_ub_tick: i64,
 }
 
 impl ObiMmStrategy {
     /// Creates a new OBI MM strategy.
+    ///
+    /// All factor engines are initialized with parameters from the config.
     pub fn new(
         global: GlobalConfig,
         params: StrategyParams,
@@ -57,6 +61,7 @@ impl ObiMmStrategy {
         let roi_ub_tick = (global.roi_ub / tick_size).round() as i64;
 
         Self {
+            // Initialize OBI factor from factor-engine
             obi_factor: OBIFactor::new(
                 params.looking_depth,
                 tick_size,
@@ -64,11 +69,12 @@ impl ObiMmStrategy {
                 roi_ub_tick,
                 params.window,
             ),
-            obi_welford: WelfordRolling::new(params.window),
+            // Initialize volatility factor from factor-engine
             volatility_factor: VolatilityFactor::new(
                 params.volatility_interval_ns,
                 60, // 60 samples for volatility window
             ),
+            // Initialize stop loss checker from factor-engine
             stop_loss: StopLossChecker::new(
                 stop_loss_config.volatility_mean,
                 stop_loss_config.volatility_std,
@@ -84,8 +90,6 @@ impl ObiMmStrategy {
             last_price: 0.0,
             minute_change: 0.0,
             tick_size,
-            roi_lb_tick,
-            roi_ub_tick,
         }
     }
 
@@ -148,8 +152,16 @@ impl ObiMmStrategy {
             self.last_change_period = change_period;
         }
 
-        // Calculate OBI using depth data
-        let alpha = self.compute_obi(bot.depth(asset_no), best_bid_tick, best_ask_tick, mid_price);
+        // Calculate OBI using factor-engine
+        // The OBIFactor handles depth scanning and z-score normalization internally
+        let depth = bot.depth(asset_no);
+        let alpha = self.obi_factor.update_with_accessor(
+            best_bid_tick,
+            best_ask_tick,
+            mid_price,
+            |tick| depth.bid_qty_at_tick(tick),
+            |tick| depth.ask_qty_at_tick(tick),
+        );
 
         // Compute prices
         let volatility_ratio =
@@ -182,49 +194,6 @@ impl ObiMmStrategy {
 
         self.last_check_period = current_period;
         true
-    }
-
-    /// Computes the OBI factor value (z-score normalized).
-    fn compute_obi<MD>(
-        &mut self,
-        depth: &MD,
-        best_bid_tick: i64,
-        best_ask_tick: i64,
-        mid_price: f64,
-    ) -> f64
-    where
-        MD: MarketDepth + L2MarketDepth,
-    {
-        // Calculate ask depth sum
-        let mut sum_ask_qty = 0.0;
-        let from_tick = best_ask_tick.max(self.roi_lb_tick);
-        let upto_tick = ((mid_price * (1.0 + self.params.looking_depth) / self.tick_size).floor()
-            as i64)
-            .min(self.roi_ub_tick);
-
-        for price_tick in from_tick..upto_tick {
-            sum_ask_qty += depth.ask_qty_at_tick(price_tick);
-        }
-
-        // Calculate bid depth sum
-        let mut sum_bid_qty = 0.0;
-        let from_tick = best_bid_tick.min(self.roi_ub_tick);
-        let upto_tick = ((mid_price * (1.0 - self.params.looking_depth) / self.tick_size).ceil()
-            as i64)
-            .max(self.roi_lb_tick);
-
-        let mut price_tick = from_tick;
-        while price_tick > upto_tick {
-            sum_bid_qty += depth.bid_qty_at_tick(price_tick);
-            price_tick -= 1;
-        }
-
-        // Compute raw imbalance
-        let raw_obi = sum_bid_qty - sum_ask_qty;
-
-        // Update internal Welford statistics and compute z-score
-        self.obi_welford.update(raw_obi);
-        self.obi_welford.zscore(raw_obi)
     }
 
     /// Updates grid orders for normal operation.
@@ -416,9 +385,7 @@ impl ObiMmStrategy {
         self.last_change_period = -1;
         self.last_price = 0.0;
         self.minute_change = 0.0;
-        use factor_engine::factors::Factor;
         self.obi_factor.reset();
-        self.obi_welford.reset();
         self.volatility_factor.reset();
         self.stop_loss.reset();
     }

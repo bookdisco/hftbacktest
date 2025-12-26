@@ -177,6 +177,78 @@ impl OBIFactor {
     pub fn std(&self) -> f64 {
         self.welford.std()
     }
+
+    /// Updates the OBI factor using a depth accessor function.
+    ///
+    /// This method is useful when working with market depth implementations
+    /// that don't provide direct array access (e.g., HashMapMarketDepth).
+    ///
+    /// # Arguments
+    ///
+    /// * `best_bid_tick` - Best bid price tick
+    /// * `best_ask_tick` - Best ask price tick
+    /// * `mid_price` - Current mid price
+    /// * `bid_qty_at_tick` - Function to get bid quantity at a given tick
+    /// * `ask_qty_at_tick` - Function to get ask quantity at a given tick
+    ///
+    /// # Returns
+    ///
+    /// The z-score normalized OBI value.
+    #[inline]
+    pub fn update_with_accessor<F, G>(
+        &mut self,
+        best_bid_tick: i64,
+        best_ask_tick: i64,
+        mid_price: f64,
+        bid_qty_at_tick: F,
+        ask_qty_at_tick: G,
+    ) -> f64
+    where
+        F: Fn(i64) -> f64,
+        G: Fn(i64) -> f64,
+    {
+        // Calculate ask depth sum
+        let mut sum_ask_qty = 0.0;
+        let from_tick = best_ask_tick.max(self.roi_lb_tick);
+        let upto_tick = ((mid_price * (1.0 + self.looking_depth) / self.tick_size).floor() as i64)
+            .min(self.roi_ub_tick);
+
+        for price_tick in from_tick..upto_tick {
+            sum_ask_qty += ask_qty_at_tick(price_tick);
+        }
+
+        // Calculate bid depth sum
+        let mut sum_bid_qty = 0.0;
+        let from_tick = best_bid_tick.min(self.roi_ub_tick);
+        let upto_tick = ((mid_price * (1.0 - self.looking_depth) / self.tick_size).ceil() as i64)
+            .max(self.roi_lb_tick);
+
+        let mut price_tick = from_tick;
+        while price_tick > upto_tick {
+            sum_bid_qty += bid_qty_at_tick(price_tick);
+            price_tick -= 1;
+        }
+
+        // Compute raw imbalance
+        self.current_raw = sum_bid_qty - sum_ask_qty;
+
+        // Update rolling statistics and compute z-score
+        self.welford.update(self.current_raw);
+        self.current_zscore = self.welford.zscore(self.current_raw);
+
+        self.current_zscore
+    }
+
+    /// Updates the OBI factor with a raw imbalance value directly.
+    ///
+    /// Use this when you've already computed the raw OBI externally.
+    #[inline]
+    pub fn update_raw(&mut self, raw_obi: f64) -> f64 {
+        self.current_raw = raw_obi;
+        self.welford.update(raw_obi);
+        self.current_zscore = self.welford.zscore(raw_obi);
+        self.current_zscore
+    }
 }
 
 impl Factor for OBIFactor {

@@ -1479,3 +1479,137 @@ hftbacktest/src/data/mod.rs                  # 导出优化版转换器
 hftbacktest/src/data/tardis.rs               # 大文件支持
 hftbacktest/examples/tardis_convert.rs       # 使用优化版
 ```
+
+---
+
+## 20. OBI MM 策略重构：使用 Factor Engine (新增)
+
+### 背景
+将 OBI MM Rust 策略中的内联因子计算代码重构为使用 `factor-engine` crate，实现代码解耦和复用。
+
+### 修改内容
+
+#### `factor-engine/src/factors/obi.rs`
+添加两个新方法以支持不同的深度数据访问模式：
+
+```rust
+/// 使用访问器函数更新 OBI 因子
+/// 适用于 L2MarketDepth trait（如 HashMapMarketDepth）
+#[inline]
+pub fn update_with_accessor<F, G>(
+    &mut self,
+    best_bid_tick: i64,
+    best_ask_tick: i64,
+    mid_price: f64,
+    bid_qty_at_tick: F,
+    ask_qty_at_tick: G,
+) -> f64
+where
+    F: Fn(i64) -> f64,
+    G: Fn(i64) -> f64,
+{
+    // 使用闭包访问深度数据
+    for price_tick in from_tick..upto_tick {
+        sum_ask_qty += ask_qty_at_tick(price_tick);
+    }
+    // ... 计算 raw OBI 和 z-score
+}
+
+/// 直接使用原始 OBI 值更新
+/// 适用于已经外部计算了深度差值的场景
+#[inline]
+pub fn update_raw(&mut self, raw_obi: f64) -> f64 {
+    self.current_raw = raw_obi;
+    self.welford.update(raw_obi);
+    self.current_zscore = self.welford.zscore(raw_obi);
+    self.current_zscore
+}
+```
+
+#### `strategies/obi_mm_rust/src/strategy.rs`
+重构策略以使用 factor-engine：
+
+**移除的代码：**
+- `roi_lb_tick: i64` 字段
+- `roi_ub_tick: i64` 字段
+- `obi_welford: WelfordRolling` 字段
+- `compute_obi()` 方法（约 40 行）
+
+**修改后的结构体：**
+```rust
+pub struct ObiMmStrategy {
+    pub global: GlobalConfig,
+    pub params: StrategyParams,
+    /// OBI factor from factor-engine (O(1) z-score computation)
+    pub obi_factor: OBIFactor,
+    /// Volatility factor from factor-engine (O(1) rolling std)
+    pub volatility_factor: VolatilityFactor,
+    /// Stop loss checker from factor-engine
+    pub stop_loss: StopLossChecker,
+    last_check_period: i64,
+    last_change_period: i64,
+    last_price: f64,
+    minute_change: f64,
+    tick_size: f64,
+}
+```
+
+**OBI 计算方式变更：**
+```rust
+// 旧代码：内联计算
+let alpha = self.compute_obi(depth, best_bid_tick, best_ask_tick, mid_price);
+
+// 新代码：使用 factor-engine
+let depth = bot.depth(asset_no);
+let alpha = self.obi_factor.update_with_accessor(
+    best_bid_tick,
+    best_ask_tick,
+    mid_price,
+    |tick| depth.bid_qty_at_tick(tick),
+    |tick| depth.ask_qty_at_tick(tick),
+);
+```
+
+**reset() 方法简化：**
+```rust
+pub fn reset(&mut self) {
+    self.last_check_period = -1;
+    self.last_change_period = -1;
+    self.last_price = 0.0;
+    self.minute_change = 0.0;
+    self.obi_factor.reset();        // 委托给 factor-engine
+    self.volatility_factor.reset();
+    self.stop_loss.reset();
+}
+```
+
+### 复杂度说明
+
+OBI 因子计算分为两部分：
+
+| 部分 | 复杂度 | 说明 |
+|------|--------|------|
+| 深度扫描 | O(d) | d = 扫描的 tick 数量 ≈ 900 (0.1% 深度) |
+| Z-score 标准化 | O(1) | 使用 Welford 在线算法 |
+
+**总复杂度**: O(d) + O(1) = O(d)
+
+Welford 算法实现了 O(1) 的滚动均值/标准差计算，无论窗口大小是 3600 还是 36000。
+
+### 验证结果
+
+重构后回测结果与重构前完全一致：
+
+| 指标 | 重构前 | 重构后 |
+|------|--------|--------|
+| Final Position | -0.0300 | -0.0300 |
+| Balance | 845.6010 | 845.6010 |
+| Fee | -870.1369 | -870.1369 |
+
+### 文件变更
+
+**修改文件:**
+```
+factor-engine/src/factors/obi.rs             # 添加 update_with_accessor, update_raw 方法
+strategies/obi_mm_rust/src/strategy.rs       # 移除内联计算，使用 factor-engine
+```
