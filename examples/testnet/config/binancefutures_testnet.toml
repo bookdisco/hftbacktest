@@ -1,0 +1,19 @@
+# Binance USD-M Futures Testnet Configuration
+#
+# Testnet registration: https://testnet.binancefuture.com/
+#
+# Features:
+#   - Free test funds available
+#   - Same API structure as mainnet
+#   - Rate limits may be different from production
+
+stream_url = "wss://fstream.binancefuture.com/ws"
+api_url = "https://demo-fapi.binance.com"
+
+# Order prefix to identify orders from this connector
+# Use different prefixes for different strategies/bots
+order_prefix = "test"
+
+# Get API keys from testnet: https://testnet.binancefuture.com/
+api_key = "Z7VoGGNlwyRCd0ATmW52pq3d2uzG80uB3uS0aXQ3XdCOx7TDLP5VQhG4q8VKkqYS"
+secret = "VQSuq8tL07BaBg10Uuo6B0xM3NtL0ZxVP1XZqXcUPT9uQrH1ZvwOsKmI0obEY94l"

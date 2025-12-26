@@ -416,7 +416,8 @@ pub fn write_npz_file<P: AsRef<Path>>(events: &[Event], output_path: P) -> Resul
 
     let options = SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
-        .compression_level(Some(6));
+        .compression_level(Some(6))
+        .large_file(true);
 
     zip.start_file("data.npy", options)
         .map_err(|e| format!("Failed to start ZIP entry: {}", e))?;

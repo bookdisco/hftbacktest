@@ -1,0 +1,19 @@
+# Binance Spot Testnet Configuration
+#
+# Testnet registration: https://testnet.binance.vision/
+#
+# Features:
+#   - Free test funds available
+#   - Same API structure as mainnet
+#   - WebSocket API support
+
+stream_url = "wss://stream.testnet.binance.vision/ws"
+ws_api_url = "wss://ws-api.testnet.binance.vision/ws-api/v3"
+api_url = "https://testnet.binance.vision"
+
+# Order prefix to identify orders from this connector
+order_prefix = "test"
+
+# Get API keys from testnet: https://testnet.binance.vision/
+api_key = ""
+secret = ""

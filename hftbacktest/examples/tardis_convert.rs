@@ -12,7 +12,7 @@ use std::io::Write;
 use std::time::Instant;
 
 use hftbacktest::data::{
-    convert_and_save, TardisConvertConfig, SnapshotMode,
+    convert_and_save_fast, TardisConvertConfig, SnapshotMode,
 };
 
 fn generate_sample_data() -> std::io::Result<(String, String)> {
@@ -116,13 +116,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         buffer_size: 100_000_000,
         ss_buffer_size: 1_000_000,
         base_latency: 0,
-        snapshot_mode: SnapshotMode::Process,
+        snapshot_mode: SnapshotMode::IgnoreSod,  // Match Python default behavior
     };
 
     println!("Converting {} files...", input_files.len());
     let start = Instant::now();
 
-    let events = convert_and_save(&input_files, output_path, &config)?;
+    let events = convert_and_save_fast(&input_files, output_path, &config)?;
 
     let elapsed = start.elapsed();
     println!(

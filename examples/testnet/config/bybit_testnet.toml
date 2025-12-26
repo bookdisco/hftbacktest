@@ -1,0 +1,19 @@
+# Bybit Testnet Configuration
+#
+# Testnet registration: https://testnet.bybit.com/
+#
+# Features:
+#   - Free test funds available
+#   - Linear perpetual contracts
+#   - Same API structure as mainnet
+
+stream_url = "wss://stream-testnet.bybit.com/v5/public/linear"
+private_stream_url = "wss://stream-testnet.bybit.com/v5/private"
+api_url = "https://api-testnet.bybit.com"
+
+# Order prefix to identify orders from this connector
+order_prefix = "test"
+
+# Get API keys from testnet: https://testnet.bybit.com/
+api_key = ""
+secret = ""

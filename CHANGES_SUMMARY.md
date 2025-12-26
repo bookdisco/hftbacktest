@@ -1184,3 +1184,298 @@ connector/src/binancepapi/mod.rs              # 实现 shutdown
 connector/src/binancepapi/user_data_stream.rs # 修复 unwrap panic
 connector/src/bybit/mod.rs                    # 实现 shutdown
 ```
+
+---
+
+## 17. Factor Engine 和 OBI MM 策略迁移 (新增)
+
+### 背景
+将 Python/Numba 实现的 OBI 市场做市策略迁移到纯 Rust，以便实盘交易使用。创建了通用的流式因子计算框架 `factor-engine`。
+
+### 新增 Crate: `factor-engine`
+
+#### 目录结构
+```
+factor-engine/
+├── Cargo.toml
+├── src/
+│   ├── lib.rs
+│   ├── primitives.rs      # 流式计算基础组件
+│   ├── combiner.rs        # 多因子组合器
+│   └── factors/
+│       ├── mod.rs         # Factor trait 定义
+│       ├── obi.rs         # Order Book Imbalance 因子
+│       ├── volatility.rs  # 波动率因子
+│       └── stop_loss.rs   # 止损检查器
+```
+
+#### 核心组件
+
+**primitives.rs** - O(1) 时间复杂度的流式计算：
+```rust
+/// 固定大小环形缓冲区
+pub struct RingBuffer<T, const N: usize> { ... }
+
+/// Welford 算法的滚动均值/标准差
+pub struct WelfordRolling { ... }
+
+/// 指数移动平均
+pub struct EMA { ... }
+
+/// 时间窗口队列
+pub struct TimeWindowQueue { ... }
+```
+
+**factors/obi.rs** - Order Book Imbalance 因子：
+```rust
+pub struct OBIFactor {
+    looking_depth: f64,
+    tick_size: f64,
+    roi_lb_tick: i64,
+    roi_ub_tick: i64,
+    welford: WelfordRolling,  // 用于 Z-score 标准化
+    current_raw: f64,
+    current_zscore: f64,
+}
+
+impl Factor for OBIFactor {
+    fn update(...) -> f64;  // 返回 Z-score
+    fn value(&self) -> f64;
+    fn reset(&mut self);
+}
+```
+
+**factors/volatility.rs** - 滚动波动率：
+```rust
+pub struct VolatilityFactor {
+    interval_ns: i64,
+    welford: WelfordRolling,
+    last_price: f64,
+    last_update_time: i64,
+}
+```
+
+**factors/stop_loss.rs** - 止损检查器：
+```rust
+pub enum StopLossStatus {
+    Normal,
+    VolatilityTriggered,
+    ChangeTriggered,
+}
+
+pub struct StopLossChecker {
+    volatility_mean: f64,
+    volatility_std: f64,
+    change_mean: f64,
+    change_std: f64,
+    volatility_threshold: f64,  // Z-score 阈值
+    change_threshold: f64,
+    status: StopLossStatus,
+}
+```
+
+### 新增 Crate: `obi-mm` (strategies/obi_mm_rust)
+
+#### 目录结构
+```
+strategies/obi_mm_rust/
+├── Cargo.toml
+├── config.example.toml
+├── src/
+│   ├── lib.rs
+│   ├── config.rs          # 策略配置
+│   ├── strategy.rs        # 核心策略逻辑
+│   ├── backtest.rs        # 回测二进制
+│   └── live.rs            # 实盘二进制
+```
+
+#### 配置结构
+
+```rust
+pub struct StrategyConfig {
+    pub global: GlobalConfig,
+    pub params: StrategyParams,
+    pub stop_loss: StopLossConfig,
+}
+
+pub struct GlobalConfig {
+    pub order_qty: f64,       // 每单数量
+    pub max_position: f64,    // 最大持仓
+    pub grid_num: i32,        // 网格数量
+    pub grid_interval: f64,   // 网格间距
+    pub roi_lb: f64,          // ROI 下界
+    pub roi_ub: f64,          // ROI 上界
+}
+
+pub struct StrategyParams {
+    pub looking_depth: f64,   // OBI 计算深度
+    pub window: i32,          // Z-score 窗口
+    pub half_spread: f64,     // 半价差
+    pub skew: f64,            // 持仓偏斜
+    pub c1: f64,              // Alpha 系数
+    pub power: f64,           // 波动率幂
+    pub live_seconds: f64,    // 订单存活时间
+    pub update_interval_ns: i64,     // 更新间隔
+    pub volatility_interval_ns: i64, // 波动率更新间隔
+}
+```
+
+#### 策略核心
+
+```rust
+pub struct ObiMmStrategy {
+    pub obi_factor: OBIFactor,
+    pub volatility_factor: VolatilityFactor,
+    pub stop_loss: StopLossChecker,
+    // ...
+}
+
+impl ObiMmStrategy {
+    /// 策略更新，返回是否更新了订单
+    pub fn update<MD>(&mut self, bot: &mut impl Bot<MD>, asset_no: usize) -> bool
+    where
+        MD: MarketDepth + L2MarketDepth;
+
+    /// 计算 OBI 因子
+    fn compute_obi<MD>(...) -> f64;
+
+    /// 更新网格订单
+    fn update_grid_orders<MD>(...);
+
+    /// 执行止损
+    fn execute_stop_loss<MD>(...);
+}
+```
+
+### 使用示例
+
+```bash
+# 回测
+cargo run --release --bin obi_mm_backtest -- \
+  --data test_data/btcusdt/2024-11-16.npz \
+  --tick-size 0.1 \
+  --lot-size 0.001 \
+  --output ./results
+
+# 实盘 (需要 live feature 和 connector)
+cargo run --release --bin obi_mm_live --features live -- \
+  --config config.toml \
+  --symbol BTCUSDT \
+  --connector-name connector
+```
+
+### 回测结果示例 (4天: 2024-11-16 至 2024-11-19)
+
+| 指标 | 值 |
+|------|-----|
+| 时长 | 96小时 (4天) |
+| 交易次数 | 78,469 笔 |
+| 交易量 | 784.69 BTC |
+| 交易额 | $71,523,142 |
+| 已实现盈亏 | -$6,928.46 |
+| 手续费 | -$3,576.16 |
+| 净盈亏 | -$11,428.02 |
+
+**注意**：默认参数未针对 BTC 优化，需要进一步调参。
+
+---
+
+## 18. Tardis 转换器优化 (新增)
+
+### Python vs Rust 一致性验证
+
+使用 1000FLOKIUSDT 2024-11-16 数据测试：
+- Python: 41,983,289 events
+- Rust: 41,983,289 events
+- **所有字段完全一致 ✓**
+
+### 性能优化
+
+创建了 `tardis_fast.rs` 优化版本：
+
+| 优化项 | 说明 |
+|--------|------|
+| 零拷贝解析 | 直接用 `&str` 比较，避免 `to_string()` 分配 |
+| 直接构造 Event | 跳过中间 `TradeRecord`/`DepthRecord` 结构体 |
+| 更大 I/O 缓冲 | 8MB 缓冲区减少系统调用 |
+| 内联解析函数 | `#[inline(always)]` 减少函数调用开销 |
+| 复用行缓冲 | 单个 `String` 缓冲区避免重复分配 |
+
+### 性能对比
+
+| 版本 | 速度 | 耗时 |
+|------|------|------|
+| 原版 | 4.43M events/sec | 9.47s |
+| 优化版 | 6.06M events/sec | 6.93s |
+| **提升** | **1.37x** | **节省 2.55s** |
+
+### 修复大文件支持
+
+修复了 >4GB NPZ 文件写入问题：
+```rust
+let options = SimpleFileOptions::default()
+    .compression_method(zip::CompressionMethod::Deflated)
+    .compression_level(Some(6))
+    .large_file(true);  // 添加大文件支持
+```
+
+### 新增文件
+```
+hftbacktest/src/data/tardis_fast.rs          # 优化版转换器
+hftbacktest/examples/tardis_benchmark.rs     # 性能对比测试
+```
+
+### 修改文件
+```
+hftbacktest/src/data/mod.rs                  # 导出 convert_fast, convert_and_save_fast
+hftbacktest/src/data/tardis.rs               # 添加 large_file(true)
+hftbacktest/examples/tardis_convert.rs       # 默认使用优化版
+```
+
+---
+
+## 19. Workspace 更新
+
+### 新增 Crate
+
+```toml
+# Cargo.toml (workspace)
+members = [
+    # ... 原有成员 ...
+    "factor-engine",           # 新增
+    "strategies/obi_mm_rust",  # 新增
+]
+```
+
+### 文件变更清单 (本次更新)
+
+**新增文件:**
+```
+factor-engine/Cargo.toml
+factor-engine/src/lib.rs
+factor-engine/src/primitives.rs
+factor-engine/src/combiner.rs
+factor-engine/src/factors/mod.rs
+factor-engine/src/factors/obi.rs
+factor-engine/src/factors/volatility.rs
+factor-engine/src/factors/stop_loss.rs
+strategies/obi_mm_rust/Cargo.toml
+strategies/obi_mm_rust/config.example.toml
+strategies/obi_mm_rust/src/lib.rs
+strategies/obi_mm_rust/src/config.rs
+strategies/obi_mm_rust/src/strategy.rs
+strategies/obi_mm_rust/src/backtest.rs
+strategies/obi_mm_rust/src/live.rs
+hftbacktest/src/data/tardis_fast.rs
+hftbacktest/examples/tardis_benchmark.rs
+scripts/convert_tardis_data.py
+test_data/btcusdt/*.npz                      # 转换后的回测数据
+```
+
+**修改文件:**
+```
+Cargo.toml                                   # 添加新 crate 到 workspace
+hftbacktest/src/data/mod.rs                  # 导出优化版转换器
+hftbacktest/src/data/tardis.rs               # 大文件支持
+hftbacktest/examples/tardis_convert.rs       # 使用优化版
+```

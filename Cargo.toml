@@ -4,8 +4,11 @@ members = [
   "hftbacktest",
   "hftbacktest-derive",
   "py-hftbacktest",
-  "collector"
-, "connector"]
+  "collector",
+  "connector",
+  "factor-engine",
+  "strategies/obi_mm_rust",
+]
 
 [profile.dev]
 opt-level = 0
