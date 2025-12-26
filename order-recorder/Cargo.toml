@@ -1,0 +1,47 @@
+[package]
+name = "order-recorder"
+version = "0.1.0"
+edition = "2021"
+description = "Order recording and analysis service for HFT strategies"
+
+[lib]
+name = "order_recorder"
+path = "src/lib.rs"
+
+[[bin]]
+name = "order-recorder"
+path = "src/main.rs"
+
+[dependencies]
+# Core
+hftbacktest = { path = "../hftbacktest", default-features = true, features = ["live"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+bincode = "2.0.0-rc.3"
+
+# IPC
+iceoryx2 = "0.5"
+
+# ClickHouse
+clickhouse = { version = "0.13", features = ["lz4", "time"] }
+time = "0.3"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Time
+chrono = "0.4"
+
+# Config
+toml = "0.8"
+
+[features]
+default = []

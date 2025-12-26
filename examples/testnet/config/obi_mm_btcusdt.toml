@@ -1,0 +1,31 @@
+# OBI MM Strategy Configuration for BTCUSDT Testnet
+# Based on MMLRM_PARAMS
+
+[global]
+# Binance requires minimum $100 notional per order
+# At BTC ~$88,000: 0.002 BTC = $176 (above $100 minimum)
+order_qty = 0.002
+max_position = 0.008
+grid_num = 1
+grid_interval = 0.1      # grid_interval_ticks=1 * tick_size=0.1
+roi_lb = 10000.0
+roi_ub = 150000.0
+
+[params]
+looking_depth = 0.025    # 2.5% depth
+window = 180             # window_minutes=30 * 6 (updates per minute at 10s interval)
+half_spread = 0.002      # 0.2%
+skew = 0.000023          # 2.3e-05
+c1 = 0.00024             # Alpha coefficient
+power = 0.2              # Volatility power
+live_seconds = 130.0     # Order lifetime
+update_interval_ns = 10000000000     # 10 seconds (interval_sec=10)
+volatility_interval_ns = 60000000000 # 60 seconds
+
+[stop_loss]
+volatility_mean = 0.005
+volatility_std = 0.002
+change_mean = 0.001
+change_std = 0.003
+volatility_threshold = 3.0   # stop_loss_threshold=3
+change_threshold = 3.0

@@ -421,9 +421,80 @@ examples/testnet/
 
 ---
 
+## OBI MM Strategy
+
+The OBI (Order Book Imbalance) Market Making strategy uses order book imbalance as an alpha signal to adjust fair price, with volatility-based spread adjustment and stop loss protection.
+
+### Running OBI MM Strategy
+
+```bash
+# Terminal 1: Start connector (same as before)
+./examples/testnet/scripts/start_connector.sh bf binancefutures \
+    examples/testnet/config/binancefutures_testnet.toml
+
+# Terminal 2: Start OBI MM strategy
+./examples/testnet/scripts/start_obi_mm.sh --connector bf --symbol btcusdt
+
+# Or with dry-run mode (no actual orders)
+./examples/testnet/scripts/start_obi_mm.sh --dry-run
+
+# Or manually with cargo:
+RUST_LOG=info cargo run --release -p obi-mm --bin obi_mm_testnet --features live -- \
+    --connector bf --symbol btcusdt
+```
+
+### OBI MM Configuration
+
+Create a custom config file (optional):
+
+```toml
+# obi_mm_config.toml
+[global]
+order_qty = 0.002        # Order size (~$180 at BTC $90k)
+max_position = 0.02      # Maximum position
+grid_num = 3             # Orders per side
+grid_interval = 1.0      # Grid spacing in dollars
+roi_lb = 0.0
+roi_ub = 200000.0
+
+[params]
+looking_depth = 0.001    # 0.1% depth for OBI calculation
+window = 360             # Z-score window (shorter for testnet)
+half_spread = 0.0005     # 0.05% half spread
+skew = 0.01              # Position-based skew
+c1 = 0.0001              # Alpha coefficient
+power = 1.0              # Volatility power
+live_seconds = 30.0      # Order lifetime
+update_interval_ns = 10000000000     # 10 seconds
+volatility_interval_ns = 60000000000 # 60 seconds
+
+[stop_loss]
+volatility_mean = 0.005
+volatility_std = 0.002
+change_mean = 0.001
+change_std = 0.003
+volatility_threshold = 3.0
+change_threshold = 3.0
+```
+
+Run with custom config:
+```bash
+./examples/testnet/scripts/start_obi_mm.sh --config ./obi_mm_config.toml
+```
+
+### OBI MM Features
+
+- **Order Book Imbalance**: Uses depth imbalance to predict short-term price direction
+- **Z-Score Normalization**: Normalizes OBI signal using rolling statistics
+- **Volatility Adjustment**: Widens spreads during high volatility
+- **Position Skew**: Adjusts quotes based on current position
+- **Stop Loss**: Automatically closes position during extreme market moves
+
+---
+
 ## Next Steps
 
-1. **Customize Strategy**: Modify `simple_mm.rs` for your trading logic
+1. **Customize Strategy**: Modify `simple_mm.rs` or use OBI MM for more sophisticated trading
 2. **Backtest**: Use converted data to backtest strategies
 3. **Monitor**: Add logging and monitoring for production
 4. **Production**: Switch to mainnet URLs when ready
@@ -431,3 +502,4 @@ examples/testnet/
 For more examples, see:
 - `hftbacktest/examples/gridtrading_live.rs`
 - `hftbacktest/examples/algo.rs`
+- `strategies/obi_mm_rust/` - OBI MM strategy implementation

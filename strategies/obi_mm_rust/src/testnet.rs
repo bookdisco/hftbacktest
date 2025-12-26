@@ -1,0 +1,351 @@
+//! OBI MM Strategy for Testnet Trading with Order Recording
+//!
+//! This binary runs the OBI MM strategy on exchange testnets (Binance Futures Testnet)
+//! and records all trading activity to ClickHouse via the order-recorder service.
+//!
+//! Usage:
+//!   # First start the order-recorder service:
+//!   cargo run --release -p order-recorder
+//!
+//!   # Then start the connector:
+//!   cargo run --release -p connector -- bf binancefutures config/binancefutures_testnet.toml
+//!
+//!   # Then run this strategy:
+//!   cargo run --release -p obi-mm --bin obi_mm_testnet --features live -- \
+//!     --connector bf --symbol btcusdt --config config.toml
+
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use anyhow::Result;
+use clap::Parser;
+use hftbacktest::{
+    live::{
+        ipc::iceoryx::IceoryxUnifiedChannel, Instrument, LiveBot, LiveBotBuilder, LoggingRecorder,
+    },
+    prelude::{Bot, HashMapMarketDepth, L2MarketDepth, MarketDepth, Recorder, INVALID_MAX, INVALID_MIN},
+    types::ElapseResult,
+};
+use order_recorder::{
+    StrategyState,
+    hook::{OrderHookContext, create_order_hook},
+};
+use tracing::{info, warn, Level};
+use tracing_subscriber::FmtSubscriber;
+
+use obi_mm::config::{GlobalConfig, StrategyConfig, StrategyParams, StopLossConfig};
+use obi_mm::ObiMmStrategy;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about = "OBI MM Strategy for Testnet with Recording")]
+struct Args {
+    /// Path to strategy configuration file (optional, uses defaults if not provided)
+    #[arg(short, long)]
+    config: Option<PathBuf>,
+
+    /// Connector name for IPC communication (must match running connector)
+    #[arg(short = 'n', long, default_value = "bf")]
+    connector: String,
+
+    /// Symbol to trade (lowercase, e.g., btcusdt)
+    #[arg(short, long, default_value = "btcusdt")]
+    symbol: String,
+
+    /// Tick size (price precision)
+    #[arg(long, default_value = "0.1")]
+    tick_size: f64,
+
+    /// Lot size (quantity precision)
+    #[arg(long, default_value = "0.001")]
+    lot_size: f64,
+
+    /// Dry run mode (log actions but don't submit orders)
+    #[arg(long, default_value = "false")]
+    dry_run: bool,
+
+    /// Log interval in seconds
+    #[arg(long, default_value = "10")]
+    log_interval: u64,
+
+    /// Strategy ID for recording
+    #[arg(long, default_value = "obi_mm_testnet")]
+    strategy_id: String,
+
+    /// IPC service name for recording events
+    #[arg(long, default_value = "hft_recording")]
+    recording_service: String,
+}
+
+fn prepare_live_with_hook(
+    args: &Args,
+    hook_ctx: Option<Arc<OrderHookContext>>,
+) -> LiveBot<IceoryxUnifiedChannel, HashMapMarketDepth> {
+    let mut builder = LiveBotBuilder::new()
+        .register(Instrument::new(
+            &args.connector,
+            &args.symbol,
+            args.tick_size,
+            args.lot_size,
+            HashMapMarketDepth::new(args.tick_size, args.lot_size),
+            0,
+        ));
+
+    // Add order hook if context is provided
+    if let Some(ctx) = hook_ctx {
+        builder = builder.order_recv_hook(move |prev_order, new_order| {
+            ctx.handle_order(prev_order, new_order);
+            Ok(())
+        });
+    }
+
+    builder.build().unwrap()
+}
+
+fn run_strategy<MD, I, R>(
+    hbt: &mut I,
+    recorder: &mut R,
+    strategy: &mut ObiMmStrategy,
+    args: &Args,
+    hook_ctx: Option<&Arc<OrderHookContext>>,
+) -> Result<()>
+where
+    MD: MarketDepth + L2MarketDepth,
+    I: Bot<MD>,
+    <I as Bot<MD>>::Error: std::fmt::Debug,
+    R: Recorder,
+    <R as Recorder>::Error: std::fmt::Debug,
+{
+    let tick_size = hbt.depth(0).tick_size();
+    let mut iteration = 0u64;
+    let log_interval_iters = args.log_interval * 2; // elapse is 500ms
+    let position_record_interval = 20u64; // Record position every 10 seconds
+
+    // Track position for PnL calculation
+    let mut last_position = 0.0f64;
+    let mut avg_entry_price = 0.0f64;
+    let mut realized_pnl = 0.0f64;
+
+    info!("Strategy started. Waiting for market data...");
+    info!("Tick size: {}", tick_size);
+
+    // Main loop: run every 500ms
+    while hbt.elapse(500_000_000).unwrap() == ElapseResult::Ok {
+        iteration += 1;
+
+        // Record periodically
+        if iteration % 20 == 0 {
+            let _ = recorder.record(hbt);
+        }
+
+        let depth = hbt.depth(0);
+        let position = hbt.position(0);
+
+        // Wait for valid market depth
+        if depth.best_bid_tick() == INVALID_MIN || depth.best_ask_tick() == INVALID_MAX {
+            if iteration % 20 == 0 {
+                info!("Waiting for market depth...");
+            }
+            continue;
+        }
+
+        let best_bid = depth.best_bid();
+        let best_ask = depth.best_ask();
+        let mid_price = (best_bid + best_ask) / 2.0;
+
+        // Track position changes for PnL
+        if position != last_position {
+            let pos_change = position - last_position;
+            if pos_change.abs() > 1e-10 {
+                // Update average entry price
+                if position.abs() < 1e-10 {
+                    // Position closed
+                    realized_pnl += (mid_price - avg_entry_price) * last_position;
+                    avg_entry_price = 0.0;
+                } else if (position > 0.0 && pos_change > 0.0) || (position < 0.0 && pos_change < 0.0) {
+                    // Adding to position
+                    let total_cost = avg_entry_price * last_position.abs() + mid_price * pos_change.abs();
+                    avg_entry_price = total_cost / position.abs();
+                } else {
+                    // Reducing position
+                    realized_pnl += (mid_price - avg_entry_price) * pos_change.abs() * if last_position > 0.0 { 1.0 } else { -1.0 };
+                }
+                last_position = position;
+            }
+        }
+
+        // Calculate unrealized PnL
+        let unrealized_pnl = if position.abs() > 1e-10 && avg_entry_price > 0.0 {
+            (mid_price - avg_entry_price) * position
+        } else {
+            0.0
+        };
+
+        // Record position snapshot periodically
+        if iteration % position_record_interval == 0 {
+            if let Some(ctx) = hook_ctx {
+                ctx.publish_position(position, avg_entry_price, mid_price, unrealized_pnl, realized_pnl);
+            }
+        }
+
+        // Log status periodically
+        if iteration % log_interval_iters == 0 {
+            let orders = hbt.orders(0);
+            info!(
+                "[{:>6}s] Mid: {:.2} | Bid: {:.2} | Ask: {:.2} | Pos: {:.4} | Orders: {} | PnL: {:.2}/{:.2}",
+                iteration / 2,
+                mid_price,
+                best_bid,
+                best_ask,
+                position,
+                orders.len(),
+                unrealized_pnl,
+                realized_pnl
+            );
+        }
+
+        // Run strategy update
+        if !args.dry_run {
+            strategy.update(hbt, 0);
+        } else {
+            // Dry run - just log what would happen
+            if iteration % log_interval_iters == 0 {
+                info!("[DRY RUN] Would update orders at mid={:.2}", mid_price);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn main() -> Result<()> {
+    // Initialize logging
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+
+    let args = Args::parse();
+
+    // Load or create configuration
+    let config = if let Some(config_path) = &args.config {
+        info!("Loading config from {:?}", config_path);
+        StrategyConfig::from_file(config_path.to_str().unwrap())?
+    } else {
+        info!("Using default testnet configuration");
+        // Create testnet-optimized defaults
+        StrategyConfig {
+            global: GlobalConfig {
+                order_qty: 0.002,      // ~$180 per order (above $100 minimum)
+                max_position: 0.02,    // Max position
+                grid_num: 3,           // 3 orders per side
+                grid_interval: 1.0,    // $1 grid interval
+                roi_lb: 0.0,
+                roi_ub: 200000.0,
+            },
+            params: StrategyParams {
+                looking_depth: 0.001,                      // 0.1% depth
+                window: 360,                               // 360 samples (shorter for testnet)
+                half_spread: 0.0005,                       // 0.05% half spread
+                skew: 0.01,                                // Position skew
+                c1: 0.0001,                                // Alpha coefficient
+                power: 1.0,                                // Volatility power
+                live_seconds: 30.0,                        // Order lifetime
+                update_interval_ns: 10_000_000_000,        // 10 seconds
+                volatility_interval_ns: 60_000_000_000,    // 60 seconds
+            },
+            stop_loss: StopLossConfig {
+                volatility_mean: 0.005,
+                volatility_std: 0.002,
+                change_mean: 0.001,
+                change_std: 0.003,
+                volatility_threshold: 3.0,
+                change_threshold: 3.0,
+            },
+        }
+    };
+
+    println!("======================================");
+    println!(" OBI MM Strategy (Testnet + Recording)");
+    println!("======================================");
+    println!("Connector: {}", args.connector);
+    println!("Symbol: {}", args.symbol);
+    println!("Strategy ID: {}", args.strategy_id);
+    println!("Recording Service: {}", args.recording_service);
+    println!("Tick Size: {}", args.tick_size);
+    println!("Lot Size: {}", args.lot_size);
+    println!("Dry Run: {}", args.dry_run);
+    println!("--------------------------------------");
+    println!("Order Qty: {}", config.global.order_qty);
+    println!("Max Position: {}", config.global.max_position);
+    println!("Grid Num: {}", config.global.grid_num);
+    println!("Half Spread: {:.4}%", config.params.half_spread * 100.0);
+    println!("Skew: {}", config.params.skew);
+    println!("C1 (Alpha): {}", config.params.c1);
+    println!("======================================");
+    println!();
+
+    // Initialize order hook context using the public module
+    let hook_ctx = create_order_hook(
+        &args.recording_service,
+        args.strategy_id.clone(),
+        args.symbol.clone(),
+        args.tick_size,
+    );
+
+    if hook_ctx.is_some() {
+        info!("Order recording enabled via order_recv_hook");
+    }
+
+    // Publish strategy starting status
+    if let Some(ref ctx) = hook_ctx {
+        ctx.publish_status(StrategyState::Starting, format!("Starting OBI MM on {}", args.symbol));
+    }
+
+    // Create live bot with order hook
+    info!("Connecting to connector '{}'...", args.connector);
+    let mut hbt = prepare_live_with_hook(&args, hook_ctx.clone());
+
+    // Wait for connection and get tick size
+    let tick_size = hbt.depth(0).tick_size();
+    info!("Connected! Using tick size: {}", tick_size);
+
+    // Create strategy
+    let mut strategy = ObiMmStrategy::new(
+        config.global,
+        config.params,
+        config.stop_loss,
+        tick_size,
+    );
+
+    // Create recorder
+    let mut recorder = LoggingRecorder::new();
+
+    // Publish running status
+    if let Some(ref ctx) = hook_ctx {
+        ctx.publish_status(StrategyState::Running, "Strategy running".to_string());
+    }
+
+    // Run strategy
+    info!("Starting OBI MM strategy...");
+    let result = run_strategy(&mut hbt, &mut recorder, &mut strategy, &args, hook_ctx.as_ref());
+
+    // Publish stopped status
+    if let Some(ref ctx) = hook_ctx {
+        let message = match &result {
+            Ok(_) => "Strategy stopped normally".to_string(),
+            Err(e) => format!("Strategy stopped with error: {:?}", e),
+        };
+        ctx.publish_status(StrategyState::Stopped, message);
+    }
+
+    if let Err(e) = result {
+        warn!("Strategy error: {:?}", e);
+    }
+
+    // Cleanup
+    info!("Closing bot...");
+    hbt.close().unwrap();
+    info!("Done.");
+
+    Ok(())
+}
