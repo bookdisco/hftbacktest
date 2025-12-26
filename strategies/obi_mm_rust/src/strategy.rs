@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use factor_engine::factors::stop_loss::StopLossStatus;
+use factor_engine::primitives::WelfordRolling;
 use factor_engine::{OBIFactor, StopLossChecker, VolatilityFactor};
 use hftbacktest::prelude::*;
 
@@ -20,8 +21,10 @@ pub struct ObiMmStrategy {
     pub global: GlobalConfig,
     /// Strategy parameters
     pub params: StrategyParams,
-    /// OBI factor
+    /// OBI factor (unused, kept for compatibility)
     pub obi_factor: OBIFactor,
+    /// OBI Welford rolling statistics for z-score
+    obi_welford: WelfordRolling,
     /// Volatility factor
     pub volatility_factor: VolatilityFactor,
     /// Stop loss checker
@@ -61,6 +64,7 @@ impl ObiMmStrategy {
                 roi_ub_tick,
                 params.window,
             ),
+            obi_welford: WelfordRolling::new(params.window),
             volatility_factor: VolatilityFactor::new(
                 params.volatility_interval_ns,
                 60, // 60 samples for volatility window
@@ -180,7 +184,7 @@ impl ObiMmStrategy {
         true
     }
 
-    /// Computes the OBI factor value.
+    /// Computes the OBI factor value (z-score normalized).
     fn compute_obi<MD>(
         &mut self,
         depth: &MD,
@@ -215,19 +219,12 @@ impl ObiMmStrategy {
             price_tick -= 1;
         }
 
-        // Compute raw imbalance and update factor
+        // Compute raw imbalance
         let raw_obi = sum_bid_qty - sum_ask_qty;
 
-        // Use internal Welford for z-score
-        self.obi_factor.update(
-            &[], // bid_depth - not used in this simplified path
-            &[], // ask_depth - not used in this simplified path
-            best_bid_tick,
-            best_ask_tick,
-            mid_price,
-        );
-
-        raw_obi
+        // Update internal Welford statistics and compute z-score
+        self.obi_welford.update(raw_obi);
+        self.obi_welford.zscore(raw_obi)
     }
 
     /// Updates grid orders for normal operation.
@@ -421,6 +418,7 @@ impl ObiMmStrategy {
         self.minute_change = 0.0;
         use factor_engine::factors::Factor;
         self.obi_factor.reset();
+        self.obi_welford.reset();
         self.volatility_factor.reset();
         self.stop_loss.reset();
     }

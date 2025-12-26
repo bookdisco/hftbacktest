@@ -22,7 +22,8 @@ use hftbacktest::{
         },
         recorder::BacktestRecorder,
     },
-    prelude::{ApplySnapshot, Bot, HashMapMarketDepth, MarketDepth},
+    depth::ROIVectorMarketDepth,
+    prelude::{ApplySnapshot, Bot, HashMapMarketDepth, L2MarketDepth, MarketDepth},
     types::{ElapseResult, Event, Recorder},
 };
 use tracing::{info, Level};
@@ -56,84 +57,33 @@ struct Args {
     /// Lot size
     #[arg(long, default_value = "0.001")]
     lot_size: f64,
+
+    /// Use ROIVectorMarketDepth instead of HashMapMarketDepth
+    #[arg(long)]
+    roi: bool,
+
+    /// ROI lower bound (price)
+    #[arg(long, default_value = "0.0")]
+    roi_lb: f64,
+
+    /// ROI upper bound (price)
+    #[arg(long, default_value = "200000.0")]
+    roi_ub: f64,
 }
 
-fn main() -> Result<()> {
-    // Initialize logging
-    let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
-        .finish();
-    tracing::subscriber::set_global_default(subscriber)?;
-
-    let args = Args::parse();
-
-    // Load configuration
-    let config = if let Some(config_path) = &args.config {
-        info!("Loading config from {:?}", config_path);
-        StrategyConfig::from_file(config_path.to_str().unwrap())?
-    } else {
-        info!("Using default configuration");
-        StrategyConfig::default()
-    };
-
-    info!("Configuration: {:?}", config);
-
-    // Build data sources
-    let data: Vec<DataSource<Event>> = args
-        .data
-        .iter()
-        .map(|p| DataSource::File(p.to_string_lossy().to_string()))
-        .collect();
-
-    for path in &args.data {
-        info!("Adding data file: {:?}", path);
-    }
-
-    // Build latency and queue models
-    let latency_model = ConstantLatency::new(1_000_000, 1_000_000); // 1ms
-    let asset_type = LinearAsset::new(1.0);
-    let queue_model = ProbQueueModel::new(PowerProbQueueFunc3::new(3.0));
-
-    let tick_size = args.tick_size;
-    let lot_size = args.lot_size;
-
-    // Load snapshot if provided
-    let snapshot_path = args.snapshot.clone();
-
-    // Build backtest
-    let hbt: Backtest<HashMapMarketDepth> = Backtest::builder()
-        .add_asset(
-            L2AssetBuilder::new()
-                .data(data)
-                .latency_model(latency_model)
-                .asset_type(asset_type)
-                .fee_model(TradingValueFeeModel::new(CommonFees::new(-0.00005, 0.0007)))
-                .exchange(ExchangeKind::NoPartialFillExchange)
-                .queue_model(queue_model)
-                .depth(move || {
-                    let mut depth = HashMapMarketDepth::new(tick_size, lot_size);
-                    if let Some(ref snap_path) = snapshot_path {
-                        if let Ok(data) = hftbacktest::backtest::data::read_npz_file(
-                            snap_path.to_str().unwrap(),
-                            "data",
-                        ) {
-                            depth.apply_snapshot(&data);
-                            info!("Applied snapshot from {:?}", snap_path);
-                        }
-                    }
-                    depth
-                })
-                .build()
-                .unwrap(),
-        )
-        .build()
-        .unwrap();
-
-    let mut hbt = hbt;
-
+/// Runs the backtest loop with a generic market depth type.
+fn run_backtest<MD>(
+    mut hbt: Backtest<MD>,
+    config: StrategyConfig,
+    output: PathBuf,
+) -> Result<()>
+where
+    MD: MarketDepth + L2MarketDepth,
+{
     // Get tick size from depth
     let tick_size = hbt.depth(0).tick_size();
     info!("Tick size: {}", tick_size);
+    info!("Market Depth: {}", std::any::type_name::<MD>());
 
     // Create strategy
     let mut strategy = ObiMmStrategy::new(config.global, config.params, config.stop_loss, tick_size);
@@ -157,7 +107,7 @@ fn main() -> Result<()> {
                 iteration += 1;
 
                 // Record state
-                recorder.record::<HashMapMarketDepth, _>(&hbt).unwrap();
+                recorder.record::<MD, _>(&hbt).unwrap();
 
                 // Log progress periodically
                 let current_time = hbt.current_timestamp();
@@ -206,8 +156,114 @@ fn main() -> Result<()> {
     info!("Fee: {:.4}", state.fee);
 
     // Save results
-    info!("Saving results to {:?}", args.output);
-    recorder.to_csv("obi_mm", &args.output).unwrap();
+    info!("Saving results to {:?}", output);
+    recorder.to_csv("obi_mm", &output).unwrap();
 
     Ok(())
+}
+
+fn main() -> Result<()> {
+    // Initialize logging
+    let subscriber = FmtSubscriber::builder()
+        .with_max_level(Level::INFO)
+        .finish();
+    tracing::subscriber::set_global_default(subscriber)?;
+
+    let args = Args::parse();
+
+    // Load configuration
+    let config = if let Some(config_path) = &args.config {
+        info!("Loading config from {:?}", config_path);
+        StrategyConfig::from_file(config_path.to_str().unwrap())?
+    } else {
+        info!("Using default configuration");
+        StrategyConfig::default()
+    };
+
+    info!("Configuration: {:?}", config);
+
+    // Build data sources
+    let data: Vec<DataSource<Event>> = args
+        .data
+        .iter()
+        .map(|p| DataSource::File(p.to_string_lossy().to_string()))
+        .collect();
+
+    for path in &args.data {
+        info!("Adding data file: {:?}", path);
+    }
+
+    let tick_size = args.tick_size;
+    let lot_size = args.lot_size;
+    let snapshot_path = args.snapshot.clone();
+    let roi_lb = args.roi_lb;
+    let roi_ub = args.roi_ub;
+
+    if args.roi {
+        info!("Using ROIVectorMarketDepth (roi_lb={}, roi_ub={})", roi_lb, roi_ub);
+
+        // Build backtest with ROIVectorMarketDepth
+        let hbt: Backtest<ROIVectorMarketDepth> = Backtest::builder()
+            .add_asset(
+                L2AssetBuilder::new()
+                    .data(data)
+                    .latency_model(ConstantLatency::new(1_000_000, 1_000_000))
+                    .asset_type(LinearAsset::new(1.0))
+                    .fee_model(TradingValueFeeModel::new(CommonFees::new(-0.00005, 0.0007)))
+                    .exchange(ExchangeKind::NoPartialFillExchange)
+                    .queue_model(ProbQueueModel::new(PowerProbQueueFunc3::new(3.0)))
+                    .depth(move || {
+                        let mut depth = ROIVectorMarketDepth::new(tick_size, lot_size, roi_lb, roi_ub);
+                        if let Some(ref snap_path) = snapshot_path {
+                            if let Ok(data) = hftbacktest::backtest::data::read_npz_file(
+                                snap_path.to_str().unwrap(),
+                                "data",
+                            ) {
+                                depth.apply_snapshot(&data);
+                                info!("Applied snapshot from {:?}", snap_path);
+                            }
+                        }
+                        depth
+                    })
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+
+        run_backtest(hbt, config, args.output)
+    } else {
+        info!("Using HashMapMarketDepth");
+
+        // Build backtest with HashMapMarketDepth
+        let hbt: Backtest<HashMapMarketDepth> = Backtest::builder()
+            .add_asset(
+                L2AssetBuilder::new()
+                    .data(data)
+                    .latency_model(ConstantLatency::new(1_000_000, 1_000_000))
+                    .asset_type(LinearAsset::new(1.0))
+                    .fee_model(TradingValueFeeModel::new(CommonFees::new(-0.00005, 0.0007)))
+                    .exchange(ExchangeKind::NoPartialFillExchange)
+                    .queue_model(ProbQueueModel::new(PowerProbQueueFunc3::new(3.0)))
+                    .depth(move || {
+                        let mut depth = HashMapMarketDepth::new(tick_size, lot_size);
+                        if let Some(ref snap_path) = snapshot_path {
+                            if let Ok(data) = hftbacktest::backtest::data::read_npz_file(
+                                snap_path.to_str().unwrap(),
+                                "data",
+                            ) {
+                                depth.apply_snapshot(&data);
+                                info!("Applied snapshot from {:?}", snap_path);
+                            }
+                        }
+                        depth
+                    })
+                    .build()
+                    .unwrap(),
+            )
+            .build()
+            .unwrap();
+
+        run_backtest(hbt, config, args.output)
+    }
 }
