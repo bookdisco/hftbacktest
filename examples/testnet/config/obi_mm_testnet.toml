@@ -25,6 +25,7 @@ roi_ub = 200000.0
 # Order Book Imbalance parameters
 looking_depth = 0.001    # 0.1% depth from mid price for OBI calculation
 window = 360             # Z-score normalization window (samples)
+volatility_window = 60   # Volatility calculation window (samples)
 
 # Spread parameters
 half_spread = 0.0005     # 0.05% half spread (bid/ask distance from fair price)

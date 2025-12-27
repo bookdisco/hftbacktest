@@ -1,6 +1,10 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use anyhow::anyhow;
 use clap::Parser;
-use tokio::{self, select, signal, sync::mpsc::unbounded_channel};
+use iceoryx2_bb_posix::signal::SignalHandler;
+use tokio::{self, sync::mpsc::unbounded_channel};
 use tracing::{error, info};
 
 use crate::file::Writer;
@@ -32,6 +36,10 @@ struct Args {
     /// Provide the connector name (e.g., "bf" for a connector started with --name bf)
     #[arg(long)]
     ipc: Option<String>,
+
+    /// Duration in seconds to run the collector. If not specified, runs until signal.
+    #[arg(long)]
+    duration: Option<u64>,
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -42,6 +50,9 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let (writer_tx, mut writer_rx) = unbounded_channel();
 
+    // Create shutdown flag for graceful shutdown
+    let shutdown = Arc::new(AtomicBool::new(false));
+
     // Check if IPC mode is requested
     let _handle = if let Some(connector_name) = args.ipc {
         // IPC mode: subscribe to a running connector
@@ -51,10 +62,12 @@ async fn main() -> Result<(), anyhow::Error> {
             ));
         }
         info!(%connector_name, symbols = ?args.symbols, "Starting in IPC mode");
+        let shutdown_clone = shutdown.clone();
         tokio::spawn(ipc_collector::run_ipc_collection(
             connector_name,
             args.symbols,
             writer_tx,
+            shutdown_clone,
         ))
     } else {
         // Direct connection mode: connect to exchange WebSocket
@@ -139,25 +152,58 @@ async fn main() -> Result<(), anyhow::Error> {
     };
 
     let mut writer = Writer::new(&args.path);
+
+    info!("Press Ctrl+C or send SIGTERM to stop");
+
+    // Optional: Set up duration-based shutdown
+    let start_time = std::time::Instant::now();
+    let duration_limit = args.duration.map(|d| std::time::Duration::from_secs(d));
+    if let Some(d) = duration_limit {
+        info!("Collector will run for {} seconds", d.as_secs());
+    }
+
     loop {
-        select! {
-            _ = signal::ctrl_c() => {
-                info!("ctrl-c received");
-                break;
+        // Check duration limit
+        if let Some(limit) = duration_limit {
+            if start_time.elapsed() >= limit {
+                info!("Duration limit reached, shutting down...");
+                shutdown.store(true, Ordering::SeqCst);
             }
-            r = writer_rx.recv() => match r {
-                Some((recv_time, symbol, data)) => {
-                    if let Err(error) = writer.write(recv_time, symbol, data) {
-                        error!(?error, "write error");
-                        break;
-                    }
-                }
-                None => {
+        }
+        // Check shutdown flag or iceoryx2's signal handler
+        if shutdown.load(Ordering::SeqCst) || SignalHandler::termination_requested() {
+            info!("Shutdown requested, exiting main loop...");
+            break;
+        }
+
+        // Use timeout to allow checking shutdown flag
+        match tokio::time::timeout(
+            tokio::time::Duration::from_millis(100),
+            writer_rx.recv()
+        ).await {
+            Ok(Some((recv_time, symbol, data))) => {
+                if let Err(error) = writer.write(recv_time, symbol, data) {
+                    error!(?error, "write error");
                     break;
                 }
             }
+            Ok(None) => {
+                info!("Writer channel closed");
+                break;
+            }
+            Err(_) => {
+                // Timeout, continue to check shutdown flag
+                continue;
+            }
         }
     }
-    // let _ = handle.await;
+
+    // Give the IPC collector time to stop gracefully
+    info!("Waiting for collector to stop...");
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // Explicitly flush all files before exiting
+    writer.flush();
+    info!("Collector shutdown complete");
     Ok(())
 }

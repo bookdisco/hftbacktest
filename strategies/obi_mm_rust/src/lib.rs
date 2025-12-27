@@ -8,6 +8,8 @@
 
 pub mod config;
 pub mod strategy;
+pub mod warmup;
 
 pub use config::{GlobalConfig, StrategyParams};
 pub use strategy::ObiMmStrategy;
+pub use warmup::{WarmupConfig, WarmupResult};

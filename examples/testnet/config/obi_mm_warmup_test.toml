@@ -1,0 +1,32 @@
+# OBI MM Strategy Configuration for Warmup Testing
+#
+# Short windows for quick warmup testing (~10 minutes)
+# Update intervals: OBI every 10s, Volatility every 60s
+
+[global]
+order_qty = 0.002        # ~$180 per order
+max_position = 0.008     # Max position
+grid_num = 1             # 1 order per side
+grid_interval = 0.1      # $0.1 grid interval
+roi_lb = 10000.0
+roi_ub = 150000.0
+
+[params]
+looking_depth = 0.025    # 2.5% depth
+window = 60              # 60 samples × 10s = 10 minutes OBI warmup
+volatility_window = 10   # 10 samples × 60s = 10 minutes volatility warmup
+half_spread = 0.002      # 0.2%
+skew = 0.000023
+c1 = 0.00024
+power = 0.2
+live_seconds = 130.0
+update_interval_ns = 10000000000     # 10 seconds
+volatility_interval_ns = 60000000000 # 60 seconds
+
+[stop_loss]
+volatility_mean = 0.005
+volatility_std = 0.002
+change_mean = 0.001
+change_std = 0.003
+volatility_threshold = 3.0
+change_threshold = 3.0

@@ -98,8 +98,8 @@ def obi_mm(
                     change_timeseries[change_t] = mid_price / last_price - 1
 
                 minute_change = change_timeseries[change_t]
-                if change_t > 60:
-                    volatility = np.nanstd(change_timeseries[max(0, int(change_t + 1 - 60)):int(change_t + 1)])
+                if change_t > p.volatility_window:
+                    volatility = np.nanstd(change_timeseries[max(0, int(change_t + 1 - p.volatility_window)):int(change_t + 1)])
                 else:
                     volatility = stop_loss_func.volatility_mean
 
@@ -129,6 +129,15 @@ def obi_mm(
             m = np.nanmean(imbalance_timeseries[max(0, int(t + 1 - p.window)):int(t + 1)])
             s = np.nanstd(imbalance_timeseries[max(0, int(t + 1 - p.window)):int(t + 1)])
             alpha = np.divide(imbalance_timeseries[t] - m, s)
+
+            t += 1
+            last_check_period = current_period
+
+            # Skip trading if factors are not ready (still warming up)
+            # OBI needs `window` samples, volatility needs `volatility_window` samples
+            if t < p.window or change_t < p.volatility_window:
+                stat.record(hbt)
+                continue
 
             #--------------------------------------------------------
             # Computes bid price and ask price.
@@ -244,11 +253,6 @@ def obi_mm(
                     elif position < 0:
                         order_price = (np.round(mid_price / tick_size) + 200) * tick_size
                         hbt.submit_buy_order(asset_no, 519, order_price, order_qty_stop, IOC, MARKET, True)
-            
-            t += 1
-            
-            # 更新上一次检查的时间段
-            last_check_period = current_period
 
             if t >= len(imbalance_timeseries):
                 raise Exception

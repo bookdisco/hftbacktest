@@ -45,6 +45,7 @@ class GlobalConfig:
 class StrategyParams:
     looking_depth: float = 0.001
     window: int = 3600
+    volatility_window: int = 60  # Window size for volatility calculation
     half_spread: float = 0.0002
     skew: float = 0.01
     c1: float = 0.0001
@@ -78,6 +79,7 @@ def obi_mm_strategy(
     # Strategy params
     looking_depth: float,
     window: int,
+    volatility_window: int,
     half_spread: float,
     skew: float,
     c1: float,
@@ -160,8 +162,8 @@ def obi_mm_strategy(
             else:
                 change_timeseries[change_t] = 0.0
 
-            if change_t > 60:
-                volatility = np.nanstd(change_timeseries[max(0, change_t + 1 - 60):change_t + 1])
+            if change_t > volatility_window:
+                volatility = np.nanstd(change_timeseries[max(0, change_t + 1 - volatility_window):change_t + 1])
             else:
                 volatility = volatility_mean
 
@@ -197,6 +199,18 @@ def obi_mm_strategy(
         m = np.nanmean(imbalance_timeseries[max(0, t + 1 - window):t + 1])
         s = np.nanstd(imbalance_timeseries[max(0, t + 1 - window):t + 1])
         alpha = np.divide(imbalance_timeseries[t] - m, s) if s > 1e-10 else 0.0
+
+        t += 1
+        last_check_period = current_period
+
+        # Skip trading if factors are not ready (still warming up)
+        # OBI needs `window` samples, volatility needs `volatility_window` samples
+        if t < window or change_t < volatility_window:
+            if current_timestamp - last_log_time >= 3600_000_000_000:
+                print(f"[WARMUP] OBI: {t}/{window}, Vol: {change_t}/{volatility_window}")
+                last_log_time = current_timestamp
+            recorder.record(hbt)
+            continue
 
         # Compute prices
         volatility_ratio = (volatility / volatility_mean) ** power
@@ -298,9 +312,6 @@ def obi_mm_strategy(
                     order_price = (np.round(mid_price / tick_size) + 200) * tick_size
                     hbt.submit_buy_order(asset_no, 519, order_price, order_qty_stop, IOC, MARKET, True)
 
-        t += 1
-        last_check_period = current_period
-
         # Log progress
         if current_timestamp - last_log_time >= 3600_000_000_000:  # Every hour
             print("Time:", current_timestamp // 1_000_000_000, "Position:", position, "Mid:", mid_price)
@@ -358,6 +369,7 @@ def run_backtest(data_files: List[str], output_path: str = "."):
         # Strategy params
         p.looking_depth,
         p.window,
+        p.volatility_window,
         p.half_spread,
         p.skew,
         p.c1,

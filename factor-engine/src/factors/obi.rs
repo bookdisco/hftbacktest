@@ -178,6 +178,12 @@ impl OBIFactor {
         self.welford.std()
     }
 
+    /// Returns the number of samples processed.
+    #[inline]
+    pub fn sample_count(&self) -> usize {
+        self.welford.count()
+    }
+
     /// Updates the OBI factor using a depth accessor function.
     ///
     /// This method is useful when working with market depth implementations

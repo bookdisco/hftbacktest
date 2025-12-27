@@ -36,18 +36,35 @@ pub struct ObiMmStrategy {
     /// Stop loss checker from factor-engine
     pub stop_loss: StopLossChecker,
     /// Last check period
-    last_check_period: i64,
+    pub(crate) last_check_period: i64,
     /// Last change period (for volatility calculation)
-    last_change_period: i64,
+    pub(crate) last_change_period: i64,
     /// Last price for return calculation
-    last_price: f64,
+    pub(crate) last_price: f64,
     /// Current minute change
-    minute_change: f64,
+    pub(crate) minute_change: f64,
     /// Tick size
-    tick_size: f64,
+    pub(crate) tick_size: f64,
 }
 
 impl ObiMmStrategy {
+    /// Returns true if all factors have enough data to produce meaningful values.
+    #[inline]
+    pub fn is_ready(&self) -> bool {
+        self.obi_factor.is_ready() && self.volatility_factor.is_ready()
+    }
+
+    /// Returns the warmup progress as (obi_samples, obi_required, vol_samples, vol_required).
+    #[inline]
+    pub fn warmup_progress(&self) -> (usize, usize, usize, usize) {
+        (
+            self.obi_factor.sample_count(),
+            self.params.window,
+            self.volatility_factor.sample_count(),
+            self.params.volatility_window,
+        )
+    }
+
     /// Creates a new OBI MM strategy.
     ///
     /// All factor engines are initialized with parameters from the config.
@@ -72,7 +89,7 @@ impl ObiMmStrategy {
             // Initialize volatility factor from factor-engine
             volatility_factor: VolatilityFactor::new(
                 params.volatility_interval_ns,
-                60, // 60 samples for volatility window
+                params.volatility_window,
             ),
             // Initialize stop loss checker from factor-engine
             stop_loss: StopLossChecker::new(
@@ -163,6 +180,13 @@ impl ObiMmStrategy {
             |tick| depth.ask_qty_at_tick(tick),
         );
 
+        self.last_check_period = current_period;
+
+        // Skip trading if factors are not ready (still warming up)
+        if !self.is_ready() {
+            return false;
+        }
+
         // Compute prices
         let volatility_ratio =
             (volatility / self.stop_loss.volatility_mean()).powf(self.params.power);
@@ -192,7 +216,6 @@ impl ObiMmStrategy {
             self.execute_stop_loss(bot, asset_no, mid_price, position);
         }
 
-        self.last_check_period = current_period;
         true
     }
 

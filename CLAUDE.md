@@ -19,8 +19,13 @@ cargo build --release
 # Run tests
 cargo test
 
-# Run a specific example (from hftbacktest directory)
+# Run a specific example
 cargo run --release --example gridtrading_backtest
+
+# Build specific packages
+cargo build --release -p connector
+cargo build --release -p collector
+cargo build --release -p order-recorder
 ```
 
 ### Python
@@ -29,11 +34,20 @@ cargo run --release --example gridtrading_backtest
 cd py-hftbacktest
 maturin develop --release
 
-# Install from PyPI
-pip install hftbacktest
-
 # Run Python tests
 pytest py-hftbacktest/tests/
+
+# Run Python strategy
+python strategies/gridtrading.py
+```
+
+### Running Live Trading
+```bash
+# 1. Start connector (must run on same machine as bot)
+./target/release/connector --name bf --connector binancefutures --config config.toml
+
+# 2. Run strategy (Rust example)
+cargo run --release --example gridtrading_live
 ```
 
 ## Architecture
@@ -44,6 +58,9 @@ pytest py-hftbacktest/tests/
 - **py-hftbacktest/**: Python bindings (PyO3) and pure Python utilities
 - **collector/**: Standalone binary for collecting market data from exchanges (Binance, Bybit, Hyperliquid)
 - **connector/**: Standalone binary for live trading connections (Binance Futures/Spot, Bybit)
+- **factor-engine/**: Streaming O(1) factor computation library (OBI, volatility, trade imbalance)
+- **order-recorder/**: Order recording service for live trading analytics (writes to ClickHouse)
+- **strategies/**: Example strategies (Python in `obi_mm/`, Rust in `obi_mm_rust/`)
 
 ### Core Concepts
 
@@ -58,7 +75,7 @@ pytest py-hftbacktest/tests/
 
 **Data Format**: Uses numpy-compatible `.npz` files with `Event` struct (64 bytes: ev flags, timestamps, price, qty, order_id, etc.). The `EXCH_EVENT`/`LOCAL_EVENT` flags indicate which processor sees each event.
 
-**IPC for Live Trading**: Bot and connector processes communicate via iceoryx2 shared memory. The connector handles exchange WebSocket/REST; the bot runs the strategy.
+**IPC for Live Trading**: Bot and connector processes communicate via iceoryx2 shared memory (zero-copy). The connector handles exchange WebSocket/REST; the bot runs the strategy. Both must run on the same machine.
 
 ### Feature Flags (Rust)
 - `backtest` (default): Backtesting functionality
@@ -74,3 +91,14 @@ pytest py-hftbacktest/tests/
 
 ### Python Integration
 Python code uses Numba JIT compilation. The `@njit` decorated functions receive opaque pointers to Rust structures, calling through `cffi` bindings defined in `py-hftbacktest/hftbacktest/binding.py`.
+
+### Factor Engine
+The `factor-engine` crate provides streaming O(1) incremental computation:
+- **Primitives**: `RingBuffer`, `WelfordRolling` (mean/std), `EMA`, `TimeWindowQueue`
+- **Factors**: `OBIFactor` (order book imbalance), `VolatilityFactor`, `StopLossChecker`
+- **Combiner**: `LinearCombiner` for multi-factor weighted combination
+
+### Key Documentation
+- `docs/LIVE_TRADING_ARCHITECTURE.md`: Detailed live trading system architecture (Chinese)
+- `docs/FACTOR_FRAMEWORK_DESIGN.md`: Factor computation framework design
+- `docs/STRATEGY_GUIDE.md`: Strategy implementation guide

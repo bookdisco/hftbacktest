@@ -39,6 +39,9 @@ pub struct StrategyParams {
     pub looking_depth: f64,
     /// Window size for OBI z-score normalization
     pub window: usize,
+    /// Window size for volatility calculation (number of samples)
+    #[serde(default = "default_volatility_window")]
+    pub volatility_window: usize,
     /// Half spread as a fraction of mid price
     pub half_spread: f64,
     /// Skew factor for position adjustment
@@ -55,11 +58,16 @@ pub struct StrategyParams {
     pub volatility_interval_ns: i64,
 }
 
+fn default_volatility_window() -> usize {
+    60
+}
+
 impl Default for StrategyParams {
     fn default() -> Self {
         Self {
             looking_depth: 0.001,
             window: 3600,
+            volatility_window: 60,
             half_spread: 0.0002,
             skew: 0.01,
             c1: 0.0001,

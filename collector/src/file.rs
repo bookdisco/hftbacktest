@@ -12,7 +12,7 @@ use tracing::info;
 pub struct RotatingFile {
     date: NaiveDate,
     path: String,
-    file: Option<GzEncoder<File>>,
+    pub(crate) file: Option<GzEncoder<File>>,
 }
 
 impl RotatingFile {
@@ -52,7 +52,10 @@ impl RotatingFile {
 
 impl Drop for RotatingFile {
     fn drop(&mut self) {
-        let _ = self.file.take().unwrap().finish();
+        // Only finish if file is still present (wasn't already flushed)
+        if let Some(file) = self.file.take() {
+            let _ = file.finish();
+        }
     }
 }
 
@@ -88,5 +91,19 @@ impl Writer {
             }
         }
         Ok(())
+    }
+
+    /// Explicitly flush and finalize all gzip files.
+    /// Call this before shutdown to ensure files are properly closed.
+    pub fn flush(&mut self) {
+        info!("Flushing {} open files...", self.file.len());
+        for (symbol, mut rotating_file) in self.file.drain() {
+            if let Some(encoder) = rotating_file.file.take() {
+                match encoder.finish() {
+                    Ok(_) => info!(%symbol, "File flushed successfully"),
+                    Err(e) => tracing::error!(%symbol, ?e, "Error flushing file"),
+                }
+            }
+        }
     }
 }

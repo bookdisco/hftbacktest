@@ -34,7 +34,7 @@ use tracing::{info, warn, Level};
 use tracing_subscriber::FmtSubscriber;
 
 use obi_mm::config::{GlobalConfig, StrategyConfig, StrategyParams, StopLossConfig};
-use obi_mm::ObiMmStrategy;
+use obi_mm::{ObiMmStrategy, WarmupConfig, WarmupResult};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about = "OBI MM Strategy for Testnet with Recording")]
@@ -74,6 +74,18 @@ struct Args {
     /// IPC service name for recording events
     #[arg(long, default_value = "hft_recording")]
     recording_service: String,
+
+    /// Directory containing npz files for warmup
+    #[arg(long)]
+    warmup_data_dir: Option<PathBuf>,
+
+    /// Maximum age of warmup data in seconds (default: 7200 = 2 hours)
+    #[arg(long, default_value = "7200")]
+    warmup_max_age: i64,
+
+    /// Minimum warmup data duration in seconds (default: 3600 = 1 hour)
+    #[arg(long, default_value = "3600")]
+    warmup_min_duration: i64,
 }
 
 fn prepare_live_with_hook(
@@ -245,6 +257,7 @@ pub fn main() -> Result<()> {
             params: StrategyParams {
                 looking_depth: 0.001,                      // 0.1% depth
                 window: 360,                               // 360 samples (shorter for testnet)
+                volatility_window: 60,                     // 60 samples for volatility
                 half_spread: 0.0005,                       // 0.05% half spread
                 skew: 0.01,                                // Position skew
                 c1: 0.0001,                                // Alpha coefficient
@@ -311,22 +324,64 @@ pub fn main() -> Result<()> {
 
     // Create strategy
     let mut strategy = ObiMmStrategy::new(
-        config.global,
-        config.params,
-        config.stop_loss,
+        config.global.clone(),
+        config.params.clone(),
+        config.stop_loss.clone(),
         tick_size,
     );
+
+    // Attempt warmup from npz data if configured
+    if let Some(ref warmup_dir) = args.warmup_data_dir {
+        info!("Attempting warmup from {:?}", warmup_dir);
+
+        let warmup_config = WarmupConfig::new(warmup_dir, &args.symbol)
+            .with_max_age(args.warmup_max_age)
+            .with_min_duration(args.warmup_min_duration);
+
+        match strategy.warmup_from_npz(&warmup_config) {
+            WarmupResult::Success { events_processed, data_age_seconds } => {
+                info!(
+                    "Warmup successful: {} events processed, data age: {} seconds",
+                    events_processed, data_age_seconds
+                );
+                let (obi, obi_req, vol, vol_req) = strategy.warmup_progress();
+                info!(
+                    "Factor status: OBI {}/{}, Vol {}/{}",
+                    obi, obi_req, vol, vol_req
+                );
+            }
+            WarmupResult::NoDataFound => {
+                warn!("No warmup data found, will warm up from live data");
+            }
+            WarmupResult::DataTooOld { age_seconds } => {
+                warn!(
+                    "Warmup data too old ({} seconds), will warm up from live data",
+                    age_seconds
+                );
+            }
+            WarmupResult::Error(e) => {
+                warn!("Warmup error: {}, will warm up from live data", e);
+            }
+        }
+    } else {
+        info!("No warmup data directory specified, will warm up from live data");
+    }
 
     // Create recorder
     let mut recorder = LoggingRecorder::new();
 
     // Publish running status
+    let warmup_status = if strategy.is_ready() {
+        "Strategy running (warmup complete)"
+    } else {
+        "Strategy running (warming up from live data)"
+    };
     if let Some(ref ctx) = hook_ctx {
-        ctx.publish_status(StrategyState::Running, "Strategy running".to_string());
+        ctx.publish_status(StrategyState::Running, warmup_status.to_string());
     }
 
     // Run strategy
-    info!("Starting OBI MM strategy...");
+    info!("Starting OBI MM strategy... (is_ready={})", strategy.is_ready());
     let result = run_strategy(&mut hbt, &mut recorder, &mut strategy, &args, hook_ctx.as_ref());
 
     // Publish stopped status

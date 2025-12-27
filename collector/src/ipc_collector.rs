@@ -8,6 +8,8 @@
 //! - Data consistency with live trading
 //! - No additional WebSocket connections needed
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -18,7 +20,9 @@ use hftbacktest::{
         DEPTH_SNAPSHOT_EVENT, TRADE_EVENT,
     },
 };
+use iceoryx2::node::NodeWaitFailure;
 use iceoryx2::prelude::{Node, NodeBuilder, ipc};
+use iceoryx2_bb_posix::signal::SignalHandler;
 use serde::Serialize;
 use tokio::sync::mpsc::UnboundedSender;
 use tracing::{debug, info, warn};
@@ -73,6 +77,7 @@ pub struct IpcCollector {
     writer_tx: UnboundedSender<(DateTime<Utc>, String, String)>,
     symbols: Vec<String>,
     event_count: u64,
+    shutdown: Arc<AtomicBool>,
 }
 
 impl IpcCollector {
@@ -81,6 +86,7 @@ impl IpcCollector {
         connector_name: &str,
         symbols: Vec<String>,
         writer_tx: UnboundedSender<(DateTime<Utc>, String, String)>,
+        shutdown: Arc<AtomicBool>,
     ) -> Result<Self, ConnectorError> {
         info!(%connector_name, ?symbols, "Creating IPC collector");
 
@@ -109,6 +115,7 @@ impl IpcCollector {
             writer_tx,
             symbols,
             event_count: 0,
+            shutdown,
         })
     }
 
@@ -138,6 +145,19 @@ impl IpcCollector {
         info!("Waiting for market data events...");
 
         loop {
+            // Check shutdown flag (set by main thread)
+            if self.shutdown.load(Ordering::Relaxed) {
+                info!("IPC collector received shutdown signal from main thread");
+                break;
+            }
+
+            // Check iceoryx2's built-in signal handler
+            if SignalHandler::termination_requested() {
+                info!("IPC collector received termination request via iceoryx2");
+                self.shutdown.store(true, Ordering::SeqCst);
+                break;
+            }
+
             // Wait for events with a small timeout
             match self.node.wait(Duration::from_millis(100)) {
                 Ok(()) => {
@@ -153,12 +173,25 @@ impl IpcCollector {
                         }
                     }
                 }
-                Err(_) => {
-                    // Timeout or interrupted, continue
+                Err(NodeWaitFailure::TerminationRequest) => {
+                    info!("IPC collector received TerminationRequest from node.wait()");
+                    self.shutdown.store(true, Ordering::SeqCst);
+                    break;
+                }
+                Err(NodeWaitFailure::Interrupt) => {
+                    // Interrupted by signal, check if we should terminate
+                    if SignalHandler::termination_requested() {
+                        info!("IPC collector interrupted with termination request");
+                        self.shutdown.store(true, Ordering::SeqCst);
+                        break;
+                    }
                     continue;
                 }
             }
         }
+
+        info!("IPC collector stopped");
+        Ok(())
     }
 
     /// Handle a received LiveEvent
@@ -291,17 +324,18 @@ impl IpcCollector {
     }
 }
 
-/// Run IPC collection from a connector
+/// Run IPC collection from a connector with shutdown support
 pub async fn run_ipc_collection(
     connector_name: String,
     symbols: Vec<String>,
     writer_tx: UnboundedSender<(DateTime<Utc>, String, String)>,
+    shutdown: Arc<AtomicBool>,
 ) -> Result<(), anyhow::Error> {
     info!(%connector_name, ?symbols, "Starting IPC collection");
 
     // Run the blocking IPC collector in a separate thread
     let handle = tokio::task::spawn_blocking(move || {
-        let mut collector = IpcCollector::new(&connector_name, symbols, writer_tx)?;
+        let mut collector = IpcCollector::new(&connector_name, symbols, writer_tx, shutdown)?;
         collector.run()
     });
 

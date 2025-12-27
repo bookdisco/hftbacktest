@@ -28,3 +28,4 @@ connector = { path = "../connector", default-features = false, features = ["bina
 # IPC mode: subscribe to connector's market data feed
 hftbacktest = { path = "../hftbacktest", default-features = false, features = ["live"] }
 iceoryx2 = { version = "0.6.1", features = ["logger_tracing"] }
+iceoryx2-bb-posix = "0.6.1"
