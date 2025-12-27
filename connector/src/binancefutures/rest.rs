@@ -176,14 +176,20 @@ impl BinanceFuturesClient {
         body.push_str(symbol);
         body.push_str("&side=");
         body.push_str(side.as_ref());
-        body.push_str("&price=");
-        body.push_str(&format!("{price:.price_prec$}"));
+        // Market orders don't accept price parameter
+        if order_type != OrdType::Market {
+            body.push_str("&price=");
+            body.push_str(&format!("{price:.price_prec$}"));
+        }
         body.push_str("&quantity=");
         body.push_str(&format!("{qty:.5}"));
         body.push_str("&type=");
         body.push_str(order_type.as_ref());
-        body.push_str("&timeInForce=");
-        body.push_str(time_in_force.as_ref());
+        // Market orders don't accept timeInForce parameter
+        if order_type != OrdType::Market {
+            body.push_str("&timeInForce=");
+            body.push_str(time_in_force.as_ref());
+        }
 
         let resp: OrderResponseResult = self.post("/fapi/v1/order", body).await?;
         match resp {
