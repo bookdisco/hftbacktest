@@ -4,8 +4,9 @@
 //! by replaying historical market data before starting live trading.
 //!
 //! Supports two data formats:
+//! - `.jsonl` files: Current IPC collector format (can read while being written)
+//! - `.gz` files: Compressed JSON format from IPC collector (previous days)
 //! - `.npz` files: Numpy format from data converters
-//! - `.gz` files: JSON format from IPC collector (direct use without conversion)
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -111,14 +112,15 @@ fn find_recent_data_file(config: &WarmupConfig) -> Option<PathBuf> {
         .map(|n| n.to_string_lossy().to_lowercase().contains(&symbol_pattern))
         .unwrap_or(false);
 
-    // Find all matching data files (npz or gz)
+    // Find all matching data files (npz, gz, or jsonl)
+    // Prefer .jsonl files as they are the current file being written and can be read in real-time
     let mut files: Vec<(PathBuf, SystemTime)> = std::fs::read_dir(dir)
         .ok()?
         .filter_map(|entry| entry.ok())
         .filter(|entry| {
             let name = entry.file_name().to_string_lossy().to_lowercase();
             let name_matches = name.contains(&symbol_pattern) || dir_contains_symbol;
-            let ext_matches = name.ends_with(".npz") || name.ends_with(".gz");
+            let ext_matches = name.ends_with(".npz") || name.ends_with(".gz") || name.ends_with(".jsonl");
             name_matches && ext_matches
         })
         .filter_map(|entry| {
@@ -358,13 +360,151 @@ fn load_warmup_events_gz(
     Ok(events)
 }
 
-/// Load warmup events from either npz or gz file
+/// Load events from IPC collector .jsonl file (uncompressed JSON format)
+/// This function can read files that are currently being written to.
+fn load_warmup_events_jsonl(
+    path: &Path,
+    min_duration_seconds: i64,
+) -> Result<Vec<Event>, String> {
+    info!("Loading warmup data from jsonl: {:?}", path);
+
+    let file = std::fs::File::open(path).map_err(|e| format!("Failed to open jsonl file: {}", e))?;
+    let reader = BufReader::new(file);
+
+    let mut events = Vec::new();
+    let mut line_count = 0;
+    let mut parse_errors = 0;
+
+    for line_result in reader.lines() {
+        let line = match line_result {
+            Ok(l) => l,
+            Err(e) => {
+                // For jsonl files being written, we might hit EOF - this is expected
+                warn!("Error reading line {} (file may still be written): {}", line_count + 1, e);
+                break;
+            }
+        };
+        line_count += 1;
+
+        // Skip empty lines
+        if line.trim().is_empty() {
+            continue;
+        }
+
+        // Log progress every 10000 lines
+        if line_count % 10000 == 0 {
+            info!("Processing line {}, events so far: {}", line_count, events.len());
+        }
+
+        // Parse format: "local_timestamp json_data"
+        let parts: Vec<&str> = line.splitn(2, ' ').collect();
+        if parts.len() != 2 {
+            continue;
+        }
+
+        let local_ts: i64 = match parts[0].parse() {
+            Ok(ts) => ts,
+            Err(_) => continue,
+        };
+
+        let json_str = parts[1];
+
+        // Try to parse as depth update first
+        if let Ok(depth) = serde_json::from_str::<DepthUpdateJson>(json_str) {
+            let exch_ts = depth.E * 1_000_000; // ms to ns
+            let is_snapshot = depth.e == "depthSnapshot";
+            let ev_type = if is_snapshot {
+                DEPTH_SNAPSHOT_EVENT
+            } else {
+                DEPTH_EVENT
+            };
+
+            // Add bid events
+            for bid in &depth.b {
+                let px: f64 = bid[0].parse().unwrap_or(0.0);
+                let qty: f64 = bid[1].parse().unwrap_or(0.0);
+                if px > 0.0 {
+                    events.push(Event {
+                        ev: ev_type | BUY_EVENT,
+                        exch_ts,
+                        local_ts,
+                        px,
+                        qty,
+                        order_id: 0,
+                        ival: 0,
+                        fval: 0.0,
+                    });
+                }
+            }
+
+            // Add ask events
+            for ask in &depth.a {
+                let px: f64 = ask[0].parse().unwrap_or(0.0);
+                let qty: f64 = ask[1].parse().unwrap_or(0.0);
+                if px > 0.0 {
+                    events.push(Event {
+                        ev: ev_type, // No BUY_EVENT flag = sell side
+                        exch_ts,
+                        local_ts,
+                        px,
+                        qty,
+                        order_id: 0,
+                        ival: 0,
+                        fval: 0.0,
+                    });
+                }
+            }
+        } else if let Ok(_trade) = serde_json::from_str::<TradeJson>(json_str) {
+            // Skip trade events for warmup - we only need depth for OBI
+            continue;
+        } else {
+            parse_errors += 1;
+        }
+    }
+
+    if events.is_empty() {
+        return Err(format!(
+            "No events parsed from jsonl file (lines: {}, errors: {})",
+            line_count, parse_errors
+        ));
+    }
+
+    // Sort by exchange timestamp
+    events.sort_by_key(|e| e.exch_ts);
+
+    // Get the time range
+    let first_ts = events.first().unwrap().exch_ts;
+    let last_ts = events.last().unwrap().exch_ts;
+    let total_duration = (last_ts - first_ts) / 1_000_000_000;
+
+    info!(
+        "Loaded {} events from {} lines, duration: {} seconds",
+        events.len(),
+        line_count,
+        total_duration
+    );
+
+    // Only keep the last `min_duration_seconds` of data for warmup
+    let warmup_start_ts = last_ts - (min_duration_seconds * 1_000_000_000);
+    events.retain(|e| e.exch_ts >= warmup_start_ts);
+
+    info!(
+        "Filtered to {} events for warmup ({} seconds of data)",
+        events.len(),
+        min_duration_seconds
+    );
+
+    Ok(events)
+}
+
+/// Load warmup events from npz, gz, or jsonl file
 fn load_warmup_events(path: &Path, min_duration_seconds: i64) -> Result<Vec<Event>, String> {
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
     match ext {
         "npz" => load_warmup_events_npz(path, min_duration_seconds),
         "gz" => load_warmup_events_gz(path, min_duration_seconds),
+        "jsonl" => load_warmup_events_jsonl(path, min_duration_seconds),
         _ => Err(format!("Unsupported file format: {}", ext)),
     }
 }
@@ -372,12 +512,13 @@ fn load_warmup_events(path: &Path, min_duration_seconds: i64) -> Result<Vec<Even
 impl ObiMmStrategy {
     /// Attempt to warm up factors from historical data.
     ///
-    /// This method loads historical data from npz or gz files and replays it
+    /// This method loads historical data from data files and replays it
     /// to initialize the factor engines before live trading starts.
     ///
     /// Supports:
+    /// - `.jsonl` files: Current IPC collector format (can read while being written)
+    /// - `.gz` files: Compressed IPC collector JSON format
     /// - `.npz` files: Converted numpy format
-    /// - `.gz` files: Direct IPC collector JSON format
     ///
     /// # Arguments
     ///

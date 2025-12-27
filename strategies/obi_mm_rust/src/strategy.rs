@@ -15,6 +15,7 @@ use factor_engine::factors::stop_loss::StopLossStatus;
 use factor_engine::factors::Factor;
 use factor_engine::{OBIFactor, StopLossChecker, VolatilityFactor};
 use hftbacktest::prelude::*;
+use tracing::{info, warn};
 
 use crate::config::{GlobalConfig, StopLossConfig, StrategyParams};
 
@@ -163,7 +164,16 @@ impl ObiMmStrategy {
             }
 
             // Check stop loss
+            let prev_status = self.stop_loss.status();
             self.stop_loss.check(volatility, self.minute_change);
+            let new_status = self.stop_loss.status();
+
+            if new_status != prev_status {
+                warn!(
+                    ?prev_status, ?new_status, %volatility, minute_change = %self.minute_change,
+                    "Stop loss status changed"
+                );
+            }
 
             self.last_price = mid_price;
             self.last_change_period = change_period;
@@ -213,6 +223,7 @@ impl ObiMmStrategy {
                 current_timestamp,
             );
         } else {
+            warn!(%mid_price, %position, "STOP LOSS TRIGGERED - executing");
             self.execute_stop_loss(bot, asset_no, mid_price, position);
         }
 
@@ -369,6 +380,7 @@ impl ObiMmStrategy {
         };
 
         // Cancel all orders
+        info!(count = order_ids.len(), "Cancelling all orders");
         for order_id in order_ids {
             let _ = bot.cancel(asset_no, order_id, false);
         }
@@ -378,6 +390,7 @@ impl ObiMmStrategy {
         if order_qty > 1e-9 {
             if position > 0.0 {
                 let order_price = ((mid_price / self.tick_size).round() - 200.0) * self.tick_size;
+                info!(%order_qty, %order_price, "Closing LONG position with SELL market order");
                 let _ = bot.submit_sell_order(
                     asset_no,
                     519,
@@ -389,6 +402,7 @@ impl ObiMmStrategy {
                 );
             } else {
                 let order_price = ((mid_price / self.tick_size).round() + 200.0) * self.tick_size;
+                info!(%order_qty, %order_price, "Closing SHORT position with BUY market order");
                 let _ = bot.submit_buy_order(
                     asset_no,
                     519,
@@ -399,6 +413,8 @@ impl ObiMmStrategy {
                     true,
                 );
             }
+        } else {
+            info!("No position to close");
         }
     }
 

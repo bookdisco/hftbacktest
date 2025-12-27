@@ -24,8 +24,8 @@ roi_ub = 200000.0
 [params]
 # Order Book Imbalance parameters
 looking_depth = 0.001    # 0.1% depth from mid price for OBI calculation
-window = 360             # Z-score normalization window (samples)
-volatility_window = 60   # Volatility calculation window (samples)
+window = 5               # Z-score normalization window (samples) - SHORT FOR TESTING
+volatility_window = 2    # Volatility calculation window (samples) - SHORT FOR TESTING
 
 # Spread parameters
 half_spread = 0.0005     # 0.05% half spread (bid/ask distance from fair price)
@@ -37,8 +37,8 @@ power = 1.0              # Volatility power (spread multiplier exponent)
 live_seconds = 30.0      # Cancel orders older than this (seconds)
 
 # Update intervals (nanoseconds)
-update_interval_ns = 10000000000     # 10 seconds between strategy updates
-volatility_interval_ns = 60000000000 # 60 seconds between volatility updates
+update_interval_ns = 5000000000      # 5 seconds between strategy updates (FAST FOR TESTING)
+volatility_interval_ns = 10000000000 # 10 seconds between volatility updates (FAST FOR TESTING)
 
 [stop_loss]
 # Stop loss parameters based on volatility and price change z-scores
@@ -50,5 +50,6 @@ change_mean = 0.001       # Expected 1-minute price change
 change_std = 0.003        # Standard deviation of price changes
 
 # Z-score thresholds for triggering stop loss
-volatility_threshold = 3.0  # Stop if volatility z-score > 3
-change_threshold = 3.0      # Stop if price change z-score > 3
+# NOTE: Using very low thresholds for testing - will trigger frequently!
+volatility_threshold = 0.1  # Stop if volatility z-score > 0.1 (TEST MODE)
+change_threshold = 0.1      # Stop if price change z-score > 0.1 (TEST MODE)
